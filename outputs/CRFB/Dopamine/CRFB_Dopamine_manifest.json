@@ -1,0 +1,34 @@
+{
+  "dataset": "CRFB",
+  "neuron_combo": "Dopamine",
+  "neuron_groups": [
+    "DF",
+    "DB"
+  ],
+  "n_neurons": 301,
+  "n_components": 3,
+  "explained_variance_ratio": [
+    0.09124070661016602,
+    0.023613694426557336,
+    0.019564946599785273
+  ],
+  "explained_variance_total": 0.13441934763650862,
+  "parameters": {
+    "event_idx": 600,
+    "window": 100,
+    "dt": 0.01,
+    "sg_window": 11,
+    "sg_order": 3
+  },
+  "event_markers": [
+    "Start",
+    "End",
+    "CR"
+  ],
+  "files": {
+    "scatter_png": "outputs\\CRFB\\Dopamine\\CRFB_Dopamine_scatter.png",
+    "trajectory_png": "outputs\\CRFB\\Dopamine\\CRFB_Dopamine_trajectory.png"
+  },
+  "warnings": [],
+  "timestamp": "2026-02-18T15:24:44.399887"
+}

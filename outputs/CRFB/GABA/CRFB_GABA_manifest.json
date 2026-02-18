@@ -1,0 +1,34 @@
+{
+  "dataset": "CRFB",
+  "neuron_combo": "GABA",
+  "neuron_groups": [
+    "GF",
+    "GB"
+  ],
+  "n_neurons": 69,
+  "n_components": 3,
+  "explained_variance_ratio": [
+    0.23746235406935703,
+    0.10604583821434092,
+    0.052686746054749135
+  ],
+  "explained_variance_total": 0.3961949383384471,
+  "parameters": {
+    "event_idx": 600,
+    "window": 100,
+    "dt": 0.01,
+    "sg_window": 11,
+    "sg_order": 3
+  },
+  "event_markers": [
+    "Start",
+    "End",
+    "CR"
+  ],
+  "files": {
+    "scatter_png": "outputs\\CRFB\\GABA\\CRFB_GABA_scatter.png",
+    "trajectory_png": "outputs\\CRFB\\GABA\\CRFB_GABA_trajectory.png"
+  },
+  "warnings": [],
+  "timestamp": "2026-02-18T15:25:00.430758"
+}

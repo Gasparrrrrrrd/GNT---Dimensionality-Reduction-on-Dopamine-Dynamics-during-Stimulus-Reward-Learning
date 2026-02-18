@@ -1,0 +1,36 @@
+{
+  "dataset": "CRFB",
+  "neuron_combo": "Combined",
+  "neuron_groups": [
+    "DF",
+    "DB",
+    "GF",
+    "GB"
+  ],
+  "n_neurons": 370,
+  "n_components": 3,
+  "explained_variance_ratio": [
+    0.07427544061559535,
+    0.06134336439814457,
+    0.03314179793428287
+  ],
+  "explained_variance_total": 0.16876060294802278,
+  "parameters": {
+    "event_idx": 600,
+    "window": 100,
+    "dt": 0.01,
+    "sg_window": 11,
+    "sg_order": 3
+  },
+  "event_markers": [
+    "Start",
+    "End",
+    "CR"
+  ],
+  "files": {
+    "scatter_png": "outputs\\CRFB\\Combined\\CRFB_Combined_scatter.png",
+    "trajectory_png": "outputs\\CRFB\\Combined\\CRFB_Combined_trajectory.png"
+  },
+  "warnings": [],
+  "timestamp": "2026-02-18T15:25:19.055995"
+}

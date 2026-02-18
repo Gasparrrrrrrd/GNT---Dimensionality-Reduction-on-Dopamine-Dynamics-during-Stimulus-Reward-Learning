@@ -1,0 +1,35 @@
+{
+  "dataset": "ToneFB",
+  "neuron_combo": "Dopamine",
+  "neuron_groups": [
+    "DF",
+    "DB"
+  ],
+  "n_neurons": 314,
+  "n_components": 3,
+  "explained_variance_ratio": [
+    0.23553155312099655,
+    0.03871759490869813,
+    0.02565972605887309
+  ],
+  "explained_variance_total": 0.29990887408856776,
+  "parameters": {
+    "event_idx": 600,
+    "window": 100,
+    "dt": 0.01,
+    "sg_window": 11,
+    "sg_order": 3
+  },
+  "event_markers": [
+    "Start",
+    "End",
+    "Tone",
+    "Reward"
+  ],
+  "files": {
+    "scatter_png": "outputs\\ToneFB\\Dopamine\\ToneFB_Dopamine_scatter.png",
+    "trajectory_png": "outputs\\ToneFB\\Dopamine\\ToneFB_Dopamine_trajectory.png"
+  },
+  "warnings": [],
+  "timestamp": "2026-02-18T15:25:38.173229"
+}

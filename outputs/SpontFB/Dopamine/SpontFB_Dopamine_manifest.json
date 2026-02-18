@@ -1,0 +1,34 @@
+{
+  "dataset": "SpontFB",
+  "neuron_combo": "Dopamine",
+  "neuron_groups": [
+    "DF",
+    "DB"
+  ],
+  "n_neurons": 422,
+  "n_components": 3,
+  "explained_variance_ratio": [
+    0.03826512055120384,
+    0.01633170657027893,
+    0.012172449157872255
+  ],
+  "explained_variance_total": 0.06676927627935503,
+  "parameters": {
+    "event_idx": 600,
+    "window": 100,
+    "dt": 0.01,
+    "sg_window": 11,
+    "sg_order": 3
+  },
+  "event_markers": [
+    "Start",
+    "End",
+    "Spont"
+  ],
+  "files": {
+    "scatter_png": "outputs\\SpontFB\\Dopamine\\SpontFB_Dopamine_scatter.png",
+    "trajectory_png": "outputs\\SpontFB\\Dopamine\\SpontFB_Dopamine_trajectory.png"
+  },
+  "warnings": [],
+  "timestamp": "2026-02-18T15:23:42.719446"
+}

@@ -1,0 +1,35 @@
+{
+  "dataset": "ToneFB",
+  "neuron_combo": "GABA",
+  "neuron_groups": [
+    "GF",
+    "GB"
+  ],
+  "n_neurons": 69,
+  "n_components": 3,
+  "explained_variance_ratio": [
+    0.2766857201587476,
+    0.12020872552953123,
+    0.05157185541783181
+  ],
+  "explained_variance_total": 0.44846630110611063,
+  "parameters": {
+    "event_idx": 600,
+    "window": 100,
+    "dt": 0.01,
+    "sg_window": 11,
+    "sg_order": 3
+  },
+  "event_markers": [
+    "Start",
+    "End",
+    "Tone",
+    "Reward"
+  ],
+  "files": {
+    "scatter_png": "outputs\\ToneFB\\GABA\\ToneFB_GABA_scatter.png",
+    "trajectory_png": "outputs\\ToneFB\\GABA\\ToneFB_GABA_trajectory.png"
+  },
+  "warnings": [],
+  "timestamp": "2026-02-18T15:25:59.335651"
+}
