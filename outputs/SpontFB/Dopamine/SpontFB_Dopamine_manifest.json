@@ -3,19 +3,21 @@
   "neuron_combo": "Dopamine",
   "neuron_groups": [
     "DF",
-    "DB"
+    "DB",
+    "D",
+    "DFB"
   ],
-  "n_neurons": 422,
+  "n_neurons": 730,
   "n_components": 3,
   "explained_variance_ratio": [
-    0.03826512055120384,
-    0.01633170657027893,
-    0.012172449157872255
+    0.06987534287131945,
+    0.02882546404656947,
+    0.013542978938816412
   ],
-  "explained_variance_total": 0.06676927627935503,
+  "explained_variance_total": 0.11224378585670533,
   "parameters": {
     "event_idx": 600,
-    "window": 100,
+    "window": 120,
     "dt": 0.01,
     "sg_window": 11,
     "sg_order": 3
@@ -30,5 +32,5 @@
     "trajectory_png": "outputs\\SpontFB\\Dopamine\\SpontFB_Dopamine_trajectory.png"
   },
   "warnings": [],
-  "timestamp": "2026-02-18T15:23:42.719446"
+  "timestamp": "2026-02-18T18:47:52.354266"
 }

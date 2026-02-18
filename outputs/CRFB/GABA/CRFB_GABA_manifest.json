@@ -3,19 +3,21 @@
   "neuron_combo": "GABA",
   "neuron_groups": [
     "GF",
-    "GB"
+    "GB",
+    "G",
+    "GFB"
   ],
-  "n_neurons": 69,
+  "n_neurons": 155,
   "n_components": 3,
   "explained_variance_ratio": [
-    0.23746235406935703,
-    0.10604583821434092,
-    0.052686746054749135
+    0.27036448335155433,
+    0.10427949242253683,
+    0.04176613891590969
   ],
-  "explained_variance_total": 0.3961949383384471,
+  "explained_variance_total": 0.41641011469000083,
   "parameters": {
     "event_idx": 600,
-    "window": 100,
+    "window": 120,
     "dt": 0.01,
     "sg_window": 11,
     "sg_order": 3
@@ -30,5 +32,5 @@
     "trajectory_png": "outputs\\CRFB\\GABA\\CRFB_GABA_trajectory.png"
   },
   "warnings": [],
-  "timestamp": "2026-02-18T15:25:00.430758"
+  "timestamp": "2026-02-18T18:48:45.512852"
 }

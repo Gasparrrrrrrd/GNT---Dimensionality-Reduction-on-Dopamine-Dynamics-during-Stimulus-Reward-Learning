@@ -3,19 +3,21 @@
   "neuron_combo": "GABA",
   "neuron_groups": [
     "GF",
-    "GB"
+    "GB",
+    "G",
+    "GFB"
   ],
-  "n_neurons": 47,
+  "n_neurons": 102,
   "n_components": 3,
   "explained_variance_ratio": [
-    0.4655259256813517,
-    0.08184731850798924,
-    0.042952071599418655
+    0.38905662768650523,
+    0.11082566727258125,
+    0.043881093957743186
   ],
-  "explained_variance_total": 0.5903253157887596,
+  "explained_variance_total": 0.5437633889168296,
   "parameters": {
     "event_idx": 600,
-    "window": 100,
+    "window": 120,
     "dt": 0.01,
     "sg_window": 11,
     "sg_order": 3
@@ -30,5 +32,5 @@
     "trajectory_png": "outputs\\SpontFB\\GABA\\SpontFB_GABA_trajectory.png"
   },
   "warnings": [],
-  "timestamp": "2026-02-18T15:24:07.115923"
+  "timestamp": "2026-02-18T18:48:09.960278"
 }

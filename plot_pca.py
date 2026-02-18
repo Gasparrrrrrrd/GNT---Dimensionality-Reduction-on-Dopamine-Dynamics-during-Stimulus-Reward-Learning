@@ -12,7 +12,7 @@ import matplotlib.colors as mcolors
 
 
 # ---------------------------------------------------------------------------
-# Data loading helpers (unchanged from original)
+# Data loading helpers
 # ---------------------------------------------------------------------------
 
 def matlab_struct_to_dict(matlab_struct):
@@ -88,6 +88,7 @@ def extract_neuron_data(data, neuron_groups):
         if timesteps is None:
             timesteps = zfwd.shape[1]
         combined = pd.concat([zfwd, zbwd], axis=1)
+        combined = combined.dropna() # Drop neurons with NaNs in either half
         parts.append(combined)
 
     X = pd.concat(parts, axis=0)
@@ -113,7 +114,7 @@ def run_pca(X, n_components=3):
     return projections, components, list(pca.explained_variance_ratio_)
 
 
-def slice_window(projections, timesteps, event_idx=600, window=100, dt=0.01):
+def slice_window(projections, timesteps, event_idx=600, window=120, dt=0.01):
     """Slice PCA projections into forward/backward windows around the event.
 
     Returns dict with keys:
@@ -173,7 +174,7 @@ EVENT_RULES = {
 }
 
 
-def get_event_markers(dataset_name, window=100):
+def get_event_markers(dataset_name, window=120):
     """Return a list of event marker dicts for the given dataset.
 
     Each dict: {label, idx, color, symbol, size}.
@@ -401,7 +402,7 @@ def build_figure(window_data, smooth_data, event_markers, title,
 # ---------------------------------------------------------------------------
 
 def plot_pca(mat_file, var_name, dataset_name, neuron_groups, neuron_combo_label,
-             n_components=3, event_idx=600, window=100, dt=0.01,
+             n_components=3, event_idx=600, window=120, dt=0.01,
              sg_window=11, sg_order=3, fwd_cmap_name='YlOrRd', bwd_cmap_name='Blues',
              output_dir=None, show=True, fig_width=1100, fig_height=800):
     """Full PCA pipeline: load -> extract -> PCA -> slice -> smooth -> plot -> save.
@@ -519,7 +520,7 @@ def run_analysis(config):
                     neuron_combo_label=combo_name,
                     n_components=pca_cfg.get('n_components', 3),
                     event_idx=win_cfg.get('event_idx', 600),
-                    window=win_cfg.get('window', 100),
+                    window=win_cfg.get('window', 120),
                     dt=win_cfg.get('dt', 0.01),
                     sg_window=smooth_cfg.get('sg_window', 11),
                     sg_order=smooth_cfg.get('sg_order', 3),
@@ -566,13 +567,13 @@ def run_analysis(config):
                         'explained_variance_total': sum(evr),
                         'parameters': {
                             'event_idx': win_cfg.get('event_idx', 600),
-                            'window': win_cfg.get('window', 100),
+                            'window': win_cfg.get('window', 120),
                             'dt': win_cfg.get('dt', 0.01),
                             'sg_window': smooth_cfg.get('sg_window', 11),
                             'sg_order': smooth_cfg.get('sg_order', 3),
                         },
                         'event_markers': [m['label'] for m in
-                                          get_event_markers(ds_name, win_cfg.get('window', 100))[0]],
+                                          get_event_markers(ds_name, win_cfg.get('window', 120))[0]],
                         'files': {
                             'scatter_png': row.get('scatter_png'),
                             'trajectory_png': row.get('trajectory_png'),
