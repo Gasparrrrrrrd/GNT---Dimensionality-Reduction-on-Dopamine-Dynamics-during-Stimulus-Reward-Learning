@@ -241,22 +241,24 @@ def slice_window(projections, timesteps, event_idx=600, window=120, dt=0.01):
 # ===========================================================================
 
 EPOCHS = {
-    'pre_tone':       {'dataset': 'ToneFB', 'start': 480, 'end': 600,
+    'pre_tone':       {'dataset': 'ToneFB', 'start': 450, 'end': 600,
                        'desc': 'Baseline before CS'},
-    'tone_to_reward': {'dataset': 'ToneFB', 'start': 600, 'end': 700,
+    'tone_to_reward': {'dataset': 'ToneFB', 'start': 600, 'end': 750,
                        'desc': 'CS processing period'},
-    'post_reward':    {'dataset': 'ToneFB', 'start': 700, 'end': 820,
+    'post_reward':    {'dataset': 'ToneFB', 'start': 700, 'end': 850,
                        'desc': 'Reward response'},
-    'pre_CR':         {'dataset': 'CRFB',   'start': 480, 'end': 600,
-                       'desc': 'Baseline before movement'},
-    'post_CR':        {'dataset': 'CRFB',   'start': 600, 'end': 720,
+    'pre_CR':         {'dataset': 'CRFB',   'start': 450, 'end': 600,
+                       'desc': 'Activity before movement'},
+    'during_CR':      {'dataset': 'CRFB',   'start': 525, 'end': 675,
+                       'desc': 'Activity during/before movement'},
+    'post_CR':        {'dataset': 'CRFB',   'start': 600, 'end': 750,
                        'desc': 'Movement execution'},
-    'pre_spont':      {'dataset': 'SpontFB','start': 480, 'end': 600,
+    'pre_spont':      {'dataset': 'SpontFB','start': 450, 'end': 600,
                        'desc': 'Baseline before spontaneous movement'},
-    'post_spont':     {'dataset': 'SpontFB','start': 600, 'end': 720,
+    'post_spont':     {'dataset': 'SpontFB','start': 600, 'end': 750,
                        'desc': 'Spontaneous movement'},
-    'full_window':    {'dataset': 'Any',    'start': 480, 'end': 720,
-                       'desc': 'Full ±120 window'},
+    'full_window':    {'dataset': 'Any',    'start': 450, 'end': 750,
+                       'desc': 'Full ±150 window'},
 }
 
 
@@ -797,16 +799,17 @@ def _align_neuron_data(data_fit, data_proj, neuron_groups):
     # Union: drop a row if it is bad in *either* dataset
     bad_rows = nan_rows_fit | nan_rows_proj
 
-    keep_rows = [idx for idx in X_fit_raw.index if idx not in bad_rows]
-    n_dropped = len(bad_rows)
+    # Only keep indices present in both DataFrames and not in bad_rows
+    shared_indices = set(X_fit_raw.index) & set(X_proj_raw.index)
+    keep_rows = [idx for idx in shared_indices if idx not in bad_rows]
+    n_dropped = len(set(X_fit_raw.index) | set(X_proj_raw.index)) - len(keep_rows)
 
     if n_dropped > 0:
-        # Format for readable logging
         nan_fit_str = {f"{g}[{r}]" for g, r in nan_rows_fit}
         nan_proj_str = {f"{g}[{r}]" for g, r in nan_rows_proj}
         logger.warning(
             f"_align_neuron_data: dropping {n_dropped} neuron row(s) that have "
-            f"NaN in at least one dataset (fit NaN: {sorted(nan_fit_str)}, "
+            f"NaN in at least one dataset or are not shared (fit NaN: {sorted(nan_fit_str)}, "
             f"project NaN: {sorted(nan_proj_str)})."
         )
 
