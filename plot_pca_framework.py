@@ -39,6 +39,7 @@ from plot_pca import (
     colorbar_trace,
     SCENE_AXES,
     smooth_trajectories,
+    build_figure,
 )
 
 logger = logging.getLogger(__name__)
@@ -893,3 +894,462 @@ def cross_project(result_fit, result_project, use_group_avg=False,
         'fit_dataset': result_fit['config']['dataset_name'],
         'project_dataset': ds_name,
     }
+
+
+def cross_class_project(result_a, result_b, window=150, event_idx=600, dt=0.01,
+                        sg_window=11, sg_order=3):
+    """Project class B neurons into class A's PC space via least-squares regression.
+
+    Class A and class B are *different* neuron populations (different feature
+    dimensions), so direct PCA projection is impossible.  Instead, we learn a
+    linear map W that maps class B activations to class A PC scores::
+
+        X_b.T @ W  ≈  Z_a.T      (least squares; W shape: n_b × n_components)
+
+    and represent class B activity in A's PC coordinate frame as::
+
+        Z_b_in_a = (X_b.T @ W).T      shape: (n_components × 2T)
+
+    Both results **must** come from the same dataset so that the time axes are
+    aligned (same trials, same timesteps).
+
+    The training R² measures how much of class A's PC temporal variance is
+    linearly predictable from class B's activity — i.e. how much shared
+    temporal structure the two populations carry.
+
+    Scientific use-case: fit on SpontFB_DF, project SpontFB_DB.
+    If the DB-backward trajectory in DF PC space resembles the DF-forward
+    trajectory, both populations encode the same direction variable.
+
+    Args:
+        result_a: analyze_dataset output for the *reference* class (PC axes).
+        result_b: analyze_dataset output for the *projected* class.
+        window, event_idx, dt, sg_window, sg_order: same as analyze_dataset.
+
+    Returns dict with: smooth_data, window_data, event_markers, metrics,
+        r2_train (mean R² across PCs), r2_per_pc (list[float]),
+        W (mapping matrix n_b × n_comp), fit_class, project_class, dataset.
+    """
+    X_a = result_a['X']
+    X_b = result_b['X']
+    pca_a = result_a['pca']
+
+    X_a_arr = X_a.values if hasattr(X_a, 'values') else np.asarray(X_a)
+    X_b_arr = X_b.values if hasattr(X_b, 'values') else np.asarray(X_b)
+
+    # Class A PC time-courses: (n_comp × 2T)
+    Z_a = pca_a.components_ @ X_a_arr
+
+    # Least-squares: (2T × n_b) @ (n_b × n_comp) ≈ (2T × n_comp)
+    # Works when 2T >> n_b (overdetermined); gives unique minimum-norm solution.
+    W, _, _, _ = np.linalg.lstsq(X_b_arr.T, Z_a.T, rcond=None)  # W: (n_b × n_comp)
+
+    # Class B projected into class A's PC space: (n_comp × 2T)
+    Z_b_in_a = (X_b_arr.T @ W).T
+
+    # R² per PC (training fit quality)
+    r2_per_pc = []
+    for k in range(Z_a.shape[0]):
+        ss_tot = float(np.sum((Z_a[k] - Z_a[k].mean()) ** 2))
+        ss_res = float(np.sum((Z_a[k] - Z_b_in_a[k]) ** 2))
+        r2_per_pc.append(1.0 - ss_res / (ss_tot + 1e-12))
+    r2_train = float(np.mean(r2_per_pc))
+
+    timesteps = result_a['timesteps']
+    win_data = slice_window(Z_b_in_a, timesteps, event_idx, window, dt)
+    smooth_data = smooth_trajectories(win_data, sg_window, sg_order)
+
+    ds_name = result_a['config']['dataset_name']
+    markers, _ = get_event_markers(ds_name, window)
+    metrics = compute_trajectory_metrics(smooth_data, win_data, dt)
+
+    return {
+        'projections': Z_b_in_a,
+        'window_data': win_data,
+        'smooth_data': smooth_data,
+        'event_markers': markers,
+        'metrics': metrics,
+        'r2_train': r2_train,
+        'r2_per_pc': r2_per_pc,
+        'W': W,
+        'fit_class': result_a['config']['combo_label'],
+        'project_class': result_b['config']['combo_label'],
+        'dataset': ds_name,
+    }
+
+
+# ===========================================================================
+# Epoch-specific analysis and saving
+# ===========================================================================
+
+# Absolute event positions used by get_epoch_event_markers
+_ABSOLUTE_EVENTS = {
+    'SpontFB': [
+        {'label': 'Spont', 'abs_idx': 600, 'color': 'purple',
+         'symbol': 'diamond', 'size': 14},
+    ],
+    'CRFB': [
+        {'label': 'CR', 'abs_idx': 600, 'color': 'red',
+         'symbol': 'diamond', 'size': 14},
+    ],
+    'ToneFB': [
+        {'label': 'Tone', 'abs_idx': 600, 'color': 'gold',
+         'symbol': 'diamond', 'size': 14},
+        {'label': 'Reward', 'abs_idx': 700, 'color': 'dodgerblue',
+         'symbol': 'square', 'size': 14},
+    ],
+}
+
+
+def get_epoch_event_markers(dataset_name, epoch_start, epoch_end):
+    """Event markers with indices relative to epoch start.
+
+    Translates absolute positions (event=600, reward=700) into epoch-
+    relative indices.  Events outside the epoch are filtered out.
+
+    Returns:
+        markers: list of dicts
+        warnings: list of str
+    """
+    epoch_len = epoch_end - epoch_start
+    markers = [
+        {'label': 'Start', 'idx': 0,
+         'color': 'black', 'symbol': 'circle', 'size': 12},
+        {'label': 'End', 'idx': epoch_len - 1,
+         'color': 'green', 'symbol': 'circle', 'size': 12},
+    ]
+    for rule in _ABSOLUTE_EVENTS.get(dataset_name, []):
+        rel_idx = rule['abs_idx'] - epoch_start
+        if 0 <= rel_idx < epoch_len:
+            markers.append({
+                'label': rule['label'], 'idx': rel_idx,
+                'color': rule['color'], 'symbol': rule['symbol'],
+                'size': rule['size'],
+            })
+    return markers, []
+
+
+def analyze_epoch(data, neuron_groups, dataset_name, combo_label,
+                  epoch_name, epoch_start, epoch_end, timesteps,
+                  n_components=3, dt=0.01, sg_window=11, sg_order=3):
+    """Run PCA on a specific time epoch within a dataset.
+
+    Slices the neuron data to [epoch_start, epoch_end) for both fwd and
+    bwd halves, fits PCA on that slice, and produces trajectory data.
+
+    Returns dict with epoch-specific results.
+    """
+    X, ts, stats = extract_neuron_data(data, neuron_groups)
+    X_epoch, epoch_ts = slice_epoch(X, ts, epoch_start, epoch_end)
+    epoch_len = epoch_end - epoch_start
+
+    n_comp = min(n_components, X_epoch.shape[0] - 1, epoch_len - 1)
+    if n_comp < 1:
+        raise ValueError(
+            f"Not enough neurons or timepoints for PCA "
+            f"(n_neurons={X_epoch.shape[0]}, epoch_len={epoch_len})"
+        )
+
+    pca_obj = fit_pca(X_epoch, n_comp)
+    projections = project_onto_pca(pca_obj, X_epoch)
+    evr = list(pca_obj.explained_variance_ratio_)
+
+    # Build window_data: fwd is first half, bwd is second half
+    fwd = projections[:, :epoch_len]
+    bwd = projections[:, epoch_len:]
+    plot_time = (np.arange(epoch_len) + epoch_start - 600) * dt  # relative to event=600
+
+    win_data = {
+        'fwd': fwd, 'bwd': bwd,
+        'n_plot': epoch_len, 'plot_time': plot_time,
+    }
+
+    # Smooth (only if epoch_len > sg_window)
+    eff_sg = min(sg_window, epoch_len - 1)
+    if eff_sg % 2 == 0:
+        eff_sg -= 1
+    eff_sg = max(eff_sg, 3)
+    eff_order = min(sg_order, eff_sg - 1)
+    smooth_data = smooth_trajectories(win_data, eff_sg, eff_order)
+
+    markers, _ = get_epoch_event_markers(dataset_name, epoch_start, epoch_end)
+    metrics = compute_trajectory_metrics(smooth_data, win_data, dt)
+
+    return {
+        'X_epoch': X_epoch,
+        'pca': pca_obj,
+        'projections': projections,
+        'explained_variance_ratio': evr,
+        'n_neurons': X_epoch.shape[0],
+        'stats': stats,
+        'window_data': win_data,
+        'smooth_data': smooth_data,
+        'event_markers': markers,
+        'metrics': metrics,
+        'epoch_name': epoch_name,
+        'epoch_start': epoch_start,
+        'epoch_end': epoch_end,
+        'config': {
+            'dataset_name': dataset_name, 'combo_label': combo_label,
+            'neuron_groups': neuron_groups, 'n_components': n_comp,
+        },
+    }
+
+
+def save_epoch_trajectories(datasets_config, neuron_combos, epochs_config,
+                            output_base='outputs', n_components=3,
+                            dt=0.01, sg_window=11, sg_order=3,
+                            fig_width=1100, fig_height=800):
+    """Generate and save epoch-specific trajectory PNGs for all combos.
+
+    Args:
+        datasets_config: dict like {'SpontFB': {'mat_file': ..., 'var_name': ...}}
+        neuron_combos: dict like {'Dopamine': ['DF','DB','D','DFB'], ...}
+        epochs_config: dict like EPOCHS
+        output_base: root output directory
+
+    Returns list of saved file paths.
+    """
+    saved_files = []
+
+    for ds_name, ds_cfg in datasets_config.items():
+        data = load_dataset(ds_cfg['mat_file'], ds_cfg['var_name'])
+
+        for combo_name, groups in neuron_combos.items():
+            for ep_name, ep_cfg in epochs_config.items():
+                # Only run epochs relevant to this dataset
+                if ep_cfg['dataset'] != ds_name and ep_cfg['dataset'] != 'Any':
+                    continue
+
+                try:
+                    ep_result = analyze_epoch(
+                        data, groups, ds_name, combo_name,
+                        ep_name, ep_cfg['start'], ep_cfg['end'],
+                        timesteps=None,  # extracted inside
+                        n_components=n_components, dt=dt,
+                        sg_window=sg_window, sg_order=sg_order,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Epoch {ep_name} for {ds_name}/{combo_name} failed: {e}"
+                    )
+                    continue
+
+                evr = ep_result['explained_variance_ratio']
+                evr_str = '+'.join(f'{v:.1%}' for v in evr)
+                title = (
+                    f"{ds_name} – {combo_name} – {ep_name}\n"
+                    f"({ep_cfg['desc']}, "
+                    f"n={ep_result['n_neurons']}, EVR={evr_str})"
+                )
+
+                fig = build_figure(
+                    ep_result['window_data'],
+                    ep_result['smooth_data'],
+                    ep_result['event_markers'],
+                    title,
+                    plot_type='trajectory',
+                    width=fig_width, height=fig_height,
+                )
+
+                out_dir = os.path.join(
+                    output_base, ds_name, combo_name, 'epochs'
+                )
+                os.makedirs(out_dir, exist_ok=True)
+                fpath = os.path.join(out_dir, f'{ep_name}_trajectory.png')
+                try:
+                    fig.write_image(fpath, scale=2)
+                    saved_files.append(fpath)
+                    print(f"  Saved: {fpath}")
+                except Exception as e:
+                    logger.warning(f"PNG export failed for {fpath}: {e}")
+
+    return saved_files
+
+
+# ===========================================================================
+# Participation ratio (effective dimensionality)
+# ===========================================================================
+
+def compute_participation_ratio(X, max_components=None):
+    """Compute the participation ratio of the covariance spectrum.
+
+    PR = (sum lambda_i)^2 / sum(lambda_i^2)
+
+    This gives the effective dimensionality of the data.
+    A value of 1 means all variance is in one dimension; a value of N
+    means variance is uniformly distributed across N dimensions.
+
+    Args:
+        X: data matrix (n_neurons, n_timepoints) or (n_neurons, 2*timesteps)
+        max_components: if set, use only this many components
+
+    Returns:
+        pr: float (participation ratio)
+        eigenvalues: array of explained variances
+    """
+    X_arr = X.values if hasattr(X, 'values') else np.asarray(X)
+    n_comp = max_components or min(X_arr.shape) - 1
+    n_comp = min(n_comp, min(X_arr.shape) - 1)
+    pca = PCA(n_components=n_comp)
+    pca.fit(X_arr.T)
+    lambdas = pca.explained_variance_
+    pr = float(np.sum(lambdas) ** 2 / np.sum(lambdas ** 2))
+    return pr, lambdas
+
+
+# ===========================================================================
+# Trajectory divergence onset
+# ===========================================================================
+
+def compute_divergence_onset(smooth_data, window_data, dt=0.01,
+                             baseline_window=20, threshold_factor=2.0):
+    """Find when fwd and bwd trajectories diverge significantly.
+
+    Computes fwd-bwd Euclidean distance over time, estimates baseline
+    separation from the first `baseline_window` timepoints, and finds
+    the first timepoint where separation exceeds `threshold_factor` ×
+    baseline.
+
+    Args:
+        smooth_data: dict with 'fwd_smooth', 'bwd_smooth'
+        window_data: dict with 'plot_time'
+        dt: timestep in seconds
+        baseline_window: number of initial timepoints for baseline estimate
+        threshold_factor: multiplier on baseline to define divergence
+
+    Returns:
+        onset_time: float (seconds relative to event), or None if never
+        onset_idx: int index, or None
+        separation: array of fwd-bwd distance over time
+        threshold: float (the separation threshold used)
+    """
+    fwd = smooth_data['fwd_smooth']
+    bwd = smooth_data['bwd_smooth']
+    separation = np.sqrt(np.sum((fwd - bwd) ** 2, axis=0))
+    plot_time = window_data['plot_time']
+
+    bw = min(baseline_window, len(separation) // 4)
+    baseline = np.mean(separation[:bw])
+    threshold = baseline * threshold_factor
+
+    exceeding = np.where(separation > threshold)[0]
+    if len(exceeding) == 0:
+        return None, None, separation, threshold
+
+    onset_idx = int(exceeding[0])
+    onset_time = float(plot_time[onset_idx])
+    return onset_time, onset_idx, separation, threshold
+
+
+# ===========================================================================
+# PC loading analysis
+# ===========================================================================
+
+def compute_pc_loadings_by_group(pca_obj, neuron_groups, stats):
+    """Compute mean absolute loading per neuron group for each PC.
+
+    Args:
+        pca_obj: fitted PCA object (components_ shape: n_comp x n_neurons)
+        neuron_groups: list of group names in order they were concatenated
+        stats: dict from extract_neuron_data with per-group {kept} counts
+
+    Returns:
+        loadings_df: DataFrame (n_components x n_groups) with mean |loading|
+    """
+    components = pca_obj.components_  # (n_comp, n_neurons)
+    n_comp = components.shape[0]
+
+    group_loadings = {}
+    offset = 0
+    for group in neuron_groups:
+        n_kept = stats[group]['kept']
+        if n_kept == 0:
+            group_loadings[group] = [0.0] * n_comp
+            continue
+        group_slice = components[:, offset:offset + n_kept]
+        group_loadings[group] = np.mean(np.abs(group_slice), axis=1).tolist()
+        offset += n_kept
+
+    return pd.DataFrame(group_loadings, index=[f'PC{i+1}' for i in range(n_comp)])
+
+
+def plot_pc_loadings(loadings_df, title="PC Loadings by Neuron Group"):
+    """Bar chart of mean absolute loading per group for each PC.
+
+    Args:
+        loadings_df: DataFrame from compute_pc_loadings_by_group()
+    """
+    n_comp = len(loadings_df)
+    groups = loadings_df.columns.tolist()
+    x = np.arange(len(groups))
+    width = 0.8 / n_comp
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    for i in range(n_comp):
+        ax.bar(x + i * width, loadings_df.iloc[i], width,
+               label=f'PC{i+1}', alpha=0.8)
+
+    ax.set_xticks(x + width * (n_comp - 1) / 2)
+    ax.set_xticklabels(groups, fontsize=10)
+    ax.set_ylabel('Mean |Loading|', fontsize=12)
+    ax.set_title(title, fontsize=14)
+    ax.legend(fontsize=10)
+    ax.grid(True, alpha=0.3, axis='y')
+    fig.tight_layout()
+    return fig
+
+
+# ===========================================================================
+# Visualization: participation ratio comparison
+# ===========================================================================
+
+def plot_participation_ratio_comparison(pr_dict, title="Participation Ratio"):
+    """Bar chart comparing effective dimensionality across analyses.
+
+    Args:
+        pr_dict: {label: participation_ratio_value}
+    """
+    labels = list(pr_dict.keys())
+    values = [pr_dict[l] for l in labels]
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    colors = ['#e74c3c' if 'Dopamine' in l else
+              '#3498db' if 'GABA' in l else '#2ecc71'
+              for l in labels]
+    ax.bar(range(len(labels)), values, color=colors, alpha=0.8)
+    ax.set_xticks(range(len(labels)))
+    ax.set_xticklabels(labels, rotation=35, ha='right', fontsize=9)
+    ax.set_ylabel('Participation Ratio', fontsize=12)
+    ax.set_title(title, fontsize=14)
+    ax.grid(True, alpha=0.3, axis='y')
+    fig.tight_layout()
+    return fig
+
+
+# ===========================================================================
+# Visualization: divergence onset comparison
+# ===========================================================================
+
+def plot_divergence_comparison(div_dict, title="Fwd-Bwd Trajectory Divergence"):
+    """Plot separation curves with divergence onset markers.
+
+    Args:
+        div_dict: {label: (onset_time, onset_idx, separation, threshold, plot_time)}
+    """
+    fig, ax = plt.subplots(figsize=(14, 6))
+    for label, (onset_t, onset_i, sep, thresh, t) in div_dict.items():
+        line, = ax.plot(t, sep, linewidth=1.5, label=label)
+        if onset_t is not None:
+            ax.axvline(onset_t, color=line.get_color(), linestyle='--',
+                       alpha=0.5)
+            ax.plot(onset_t, sep[onset_i], 'o', color=line.get_color(),
+                    markersize=8)
+
+    ax.set_xlabel('Time (s)', fontsize=12)
+    ax.set_ylabel('Fwd-Bwd Separation', fontsize=12)
+    ax.set_title(title, fontsize=14)
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    return fig
