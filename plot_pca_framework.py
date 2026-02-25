@@ -187,25 +187,34 @@ def align_pca_signs(pca_target, pca_reference):
          (shape n_comp × n_comp); M[i,j] = dot between target PC-i and ref PC-j.
       2. Use the Hungarian algorithm on −|M| to find the optimal bijection
          (permute target rows to maximise |alignment| with reference rows).
-      3. Sign-flip each matched pair so their dot product is positive.
+      3. Invert the permutation so that new[k] aligns with reference[k].
+      4. Sign-flip each matched pair so their dot product is positive.
 
-    Returns the modified pca_target and the permutation array.
+    Returns the modified pca_target and the permutation array (inv_perm),
+    where inv_perm[k] is the original target PC index now at position k.
     """
     from scipy.optimize import linear_sum_assignment
 
     M = pca_target.components_ @ pca_reference.components_.T  # (n_comp, n_comp)
     row_ind, col_ind = linear_sum_assignment(-np.abs(M))
 
-    # Build reordered components (col_ind[i] = which target row maps to ref row i)
-    new_components = pca_target.components_[col_ind].copy()
+    # col_ind[i] = the reference PC that target PC i is assigned to.
+    # We need the INVERSE permutation: inv_perm[k] = which target PC should
+    # be placed at position k (to align with reference PC k).
+    n = len(col_ind)
+    inv_perm = np.empty(n, dtype=col_ind.dtype)
+    inv_perm[col_ind] = np.arange(n)
 
-    # Sign-flip so each matched dot product is positive
-    for i, j in enumerate(col_ind):
-        if M[j, i] < 0:
-            new_components[i] *= -1
+    new_components = pca_target.components_[inv_perm].copy()
+
+    # Sign-flip so each matched dot product is positive.
+    # new[k] = original target PC inv_perm[k], should align with ref PC k.
+    for k in range(n):
+        if M[inv_perm[k], k] < 0:
+            new_components[k] *= -1
 
     pca_target.components_ = new_components
-    return pca_target, col_ind
+    return pca_target, inv_perm
 
 
 def run_pca(X, n_components=3):
@@ -279,12 +288,17 @@ EPOCHS = {
                        'desc': 'CS processing window (tone onset → reward delivery)'},
     'post_reward':    {'dataset': 'ToneFB', 'start': 700, 'end': 850,
                        'desc': 'Reward response (reward delivery onward)'},
-    'pre_CR':         {'dataset': 'CRFB',   'start': 450, 'end': 600,
-                       'desc': 'Activity before movement'},
-    'during_CR':      {'dataset': 'CRFB',   'start': 525, 'end': 675,
-                       'desc': 'Activity during/before movement'},
-    'post_CR':        {'dataset': 'CRFB',   'start': 600, 'end': 750,
-                       'desc': 'Movement execution'},
+    # CRFB epochs: non-overlapping to avoid inflated cross-epoch R².
+    # Previous definition had 'during_CR' [525,675) overlapping both
+    # 'pre_CR' [450,600) and 'post_CR' [600,750) by 75 timesteps each.
+    'pre_CR':         {'dataset': 'CRFB',   'start': 450, 'end': 525,
+                       'desc': 'Well before movement'},
+    'peri_CR':        {'dataset': 'CRFB',   'start': 525, 'end': 600,
+                       'desc': 'Immediately before movement (ramp-up)'},
+    'post_CR':        {'dataset': 'CRFB',   'start': 600, 'end': 675,
+                       'desc': 'Movement execution (early)'},
+    'late_CR':        {'dataset': 'CRFB',   'start': 675, 'end': 750,
+                       'desc': 'Movement execution (late)'},
     'pre_spont':      {'dataset': 'SpontFB','start': 450, 'end': 600,
                        'desc': 'Baseline before spontaneous movement'},
     'post_spont':     {'dataset': 'SpontFB','start': 600, 'end': 750,
@@ -330,16 +344,25 @@ def compute_trajectory_metrics(smooth_data, window_data, dt=0.01):
         return np.sqrt(np.sum(diff**2, axis=0))
 
     def _curvature(traj):
-        # curvature = |v x a| / |v|^3  (in 3D)
+        # curvature = |v x a| / |v|^3
+        ndim = traj.shape[0]
+        if ndim < 2:
+            # Curvature is undefined in 1D
+            return np.zeros(max(traj.shape[1] - 2, 0))
         v = np.diff(traj, axis=1) / dt          # velocity (n_comp, n-1)
         a = np.diff(v, axis=1) / dt             # acceleration (n_comp, n-2)
         v_mid = v[:, :-1]                        # match dims
-        if traj.shape[0] == 3:
+        if ndim == 2:
+            cross_mag = np.abs(v_mid[0]*a[1] - v_mid[1]*a[0])
+        elif ndim == 3:
             cross = np.cross(v_mid.T, a.T).T     # (3, n-2)
             cross_mag = np.sqrt(np.sum(cross**2, axis=0))
         else:
-            # 2D: |v1*a2 - v2*a1|
-            cross_mag = np.abs(v_mid[0]*a[1] - v_mid[1]*a[0])
+            # General N-D: kappa = sqrt(|v|^2|a|^2 - (v·a)^2) / |v|^3
+            v_dot_a = np.sum(v_mid * a, axis=0)
+            v_sq = np.sum(v_mid**2, axis=0)
+            a_sq = np.sum(a**2, axis=0)
+            cross_mag = np.sqrt(np.maximum(v_sq * a_sq - v_dot_a**2, 0.0))
         v_mag = np.sqrt(np.sum(v_mid**2, axis=0))
         v_mag = np.maximum(v_mag, 1e-12)
         return cross_mag / (v_mag**3)
@@ -707,6 +730,207 @@ def compute_procrustes_comparison(smooth_data_a, smooth_data_b,
         out['both'] = {'disparity': d, 'aligned_a': a, 'aligned_b': b}
 
     return out
+
+
+# ===========================================================================
+# Null models and permutation tests (Issues B & F)
+# ===========================================================================
+
+def null_cross_projection_r2(data_fit, data_project, neuron_groups,
+                              n_components=3, n_permutations=500,
+                              seed=42):
+    """Null distribution for group-averaged cross-projection R².
+
+    With only ~4 group-average features and 3 PCs, cross-projection R²
+    is structurally biased upward.  This function builds a null
+    distribution by independently phase-randomising each group's
+    time-course (preserving autocorrelation and power spectrum) in the
+    *project* dataset before projecting onto the fit PCA basis.
+
+    Args:
+        data_fit:  raw data dict for the fitting dataset.
+        data_project: raw data dict for the dataset to project.
+        neuron_groups: list of group names (e.g. ['DF','DB','D','DFB']).
+        n_components: int.
+        n_permutations: number of null samples.
+        seed: int — RNG seed for reproducibility.
+
+    Returns:
+        observed_r2: float — real cross-projection R².
+        null_r2s: np.ndarray (n_permutations,) — null R² values.
+        p_value: float — fraction of null R² >= observed.
+    """
+    rng = np.random.default_rng(seed)
+
+    # --- observed ---
+    X_fit, ts_fit, _ = extract_group_averaged_data(data_fit, neuron_groups)
+    X_proj, ts_proj, _ = extract_group_averaged_data(data_project, neuron_groups)
+    n_comp = min(n_components, X_fit.shape[0])
+    pca_fit = fit_pca(X_fit, n_comp)
+    observed_r2 = compute_reconstruction_r2(pca_fit, X_proj)
+
+    # --- null distribution via phase randomisation ---
+    null_r2s = np.empty(n_permutations)
+    X_proj_arr = X_proj.values if hasattr(X_proj, 'values') else np.asarray(X_proj)
+
+    for i in range(n_permutations):
+        X_null = _phase_randomise(X_proj_arr, rng)
+        X_null_df = pd.DataFrame(X_null)
+        null_r2s[i] = compute_reconstruction_r2(pca_fit, X_null_df)
+
+    p_value = float((np.sum(null_r2s >= observed_r2) + 1) / (n_permutations + 1))
+    return observed_r2, null_r2s, p_value
+
+
+def null_separation(smooth_data, window_data, dt=0.01,
+                    n_permutations=500, seed=42):
+    """Null distribution for fwd-bwd trajectory separation.
+
+    Phase-randomises each PC's projected time-course independently for
+    both forward and backward, then recomputes post-event mean
+    separation.  This preserves the autocorrelation and power spectrum
+    of each PC while destroying the cross-condition structure.
+
+    Args:
+        smooth_data: dict with 'fwd_smooth', 'bwd_smooth'.
+        window_data: dict with 'plot_time'.
+        dt: timestep in seconds.
+        n_permutations: number of null samples.
+        seed: int.
+
+    Returns:
+        observed_sep: float — real post-event mean separation.
+        null_seps: np.ndarray (n_permutations,).
+        p_value: float.
+    """
+    rng = np.random.default_rng(seed)
+
+    fwd = smooth_data['fwd_smooth']
+    bwd = smooth_data['bwd_smooth']
+    plot_time = window_data['plot_time']
+    post_mask = plot_time >= 0
+
+    # Observed
+    sep = np.sqrt(np.sum((fwd - bwd)**2, axis=0))
+    observed_sep = float(np.mean(sep[post_mask])) if np.any(post_mask) else float(np.mean(sep))
+
+    # Null: phase-randomise fwd and bwd independently
+    null_seps = np.empty(n_permutations)
+    for i in range(n_permutations):
+        fwd_null = _phase_randomise(fwd, rng)
+        bwd_null = _phase_randomise(bwd, rng)
+        sep_null = np.sqrt(np.sum((fwd_null - bwd_null)**2, axis=0))
+        null_seps[i] = float(np.mean(sep_null[post_mask])) if np.any(post_mask) else float(np.mean(sep_null))
+
+    p_value = float((np.sum(null_seps >= observed_sep) + 1) / (n_permutations + 1))
+    return observed_sep, null_seps, p_value
+
+
+def null_cross_class_r2(result_a, result_b, n_permutations=200,
+                         n_folds=5, seed=42):
+    """Null distribution for cross-class projection R².
+
+    Shuffles neuron assignments between class A and class B (keeping
+    the total pool fixed) before fitting the lstsq mapping, then
+    computes CV R².  This tests whether the observed cross-class
+    mapping captures genuine shared structure vs. fitting noise.
+
+    Args:
+        result_a: analyze_dataset output for class A (reference).
+        result_b: analyze_dataset output for class B (projected).
+        n_permutations: number of shuffles (lower default — CV is slow).
+        n_folds: int.
+        seed: int.
+
+    Returns:
+        observed_r2: float — real CV R².
+        null_r2s: np.ndarray (n_permutations,).
+        p_value: float.
+    """
+    rng = np.random.default_rng(seed)
+
+    X_a = result_a['X']
+    X_b = result_b['X']
+    pca_a = result_a['pca']
+
+    X_a_arr = X_a.values if hasattr(X_a, 'values') else np.asarray(X_a)
+    X_b_arr = X_b.values if hasattr(X_b, 'values') else np.asarray(X_b)
+
+    Z_a = pca_a.components_ @ (X_a_arr - pca_a.mean_[:, np.newaxis])
+
+    # Observed CV R²
+    observed_r2 = _cv_r2_lstsq(X_b_arr, Z_a, n_folds)
+
+    # Pool all neurons and reshuffle
+    X_pool = np.vstack([X_a_arr, X_b_arr])  # (n_a + n_b, 2T)
+    n_a = X_a_arr.shape[0]
+
+    null_r2s = np.empty(n_permutations)
+    for i in range(n_permutations):
+        idx = rng.permutation(X_pool.shape[0])
+        X_a_shuf = X_pool[idx[:n_a], :]
+        X_b_shuf = X_pool[idx[n_a:], :]
+
+        # Refit PCA on shuffled A
+        pca_shuf = fit_pca(pd.DataFrame(X_a_shuf), pca_a.n_components)
+        Z_a_shuf = pca_shuf.components_ @ (X_a_shuf - pca_shuf.mean_[:, np.newaxis])
+
+        null_r2s[i] = _cv_r2_lstsq(X_b_shuf, Z_a_shuf, n_folds)
+
+    p_value = float((np.sum(null_r2s >= observed_r2) + 1) / (n_permutations + 1))
+    return observed_r2, null_r2s, p_value
+
+
+def _cv_r2_lstsq(X_b, Z_a, n_folds):
+    """Internal: k-fold CV R² for lstsq mapping X_b -> Z_a (with intercept)."""
+    n_time = X_b.shape[1]
+    fold_size = n_time // n_folds
+    fold_r2s = []
+
+    for fold in range(n_folds):
+        ts = fold * fold_size
+        te = ts + fold_size if fold < n_folds - 1 else n_time
+        test_mask = np.zeros(n_time, dtype=bool)
+        test_mask[ts:te] = True
+        train_mask = ~test_mask
+
+        X_train = np.column_stack([X_b[:, train_mask].T, np.ones(train_mask.sum())])
+        Z_train = Z_a[:, train_mask]
+        X_test = np.column_stack([X_b[:, test_mask].T, np.ones(test_mask.sum())])
+        Z_test = Z_a[:, test_mask]
+
+        W_aug, _, _, _ = np.linalg.lstsq(X_train, Z_train.T, rcond=None)
+        Z_pred = (X_test @ W_aug).T
+
+        r2s = []
+        for k in range(Z_a.shape[0]):
+            ss_tot = float(np.sum((Z_test[k] - Z_test[k].mean()) ** 2))
+            ss_res = float(np.sum((Z_test[k] - Z_pred[k]) ** 2))
+            r2s.append(1.0 - ss_res / (ss_tot + 1e-12))
+        fold_r2s.append(np.mean(r2s))
+
+    return float(np.mean(fold_r2s))
+
+
+def _phase_randomise(X, rng):
+    """Phase-randomise each row of X independently (preserves power spectrum).
+
+    For each row: FFT → randomise phases → IFFT → take real part.
+    The autocorrelation structure and marginal variance are preserved,
+    but cross-row temporal alignment is destroyed.
+    """
+    n_rows, n_cols = X.shape
+    X_out = np.empty_like(X)
+    for r in range(n_rows):
+        freq = np.fft.rfft(X[r])
+        phases = rng.uniform(0, 2 * np.pi, size=freq.shape)
+        # Preserve DC and Nyquist (real-valued)
+        phases[0] = 0.0
+        if n_cols % 2 == 0:
+            phases[-1] = 0.0
+        freq_rand = np.abs(freq) * np.exp(1j * phases)
+        X_out[r] = np.fft.irfft(freq_rand, n=n_cols)
+    return X_out
 
 
 # ===========================================================================
@@ -1384,12 +1608,15 @@ def cross_class_project(result_a, result_b, window=150, event_idx=600, dt=0.01,
     Z_a = pca_a.components_ @ (X_a_arr - pca_a.mean_[:, np.newaxis])
 
     # ---- Full-data (training) fit ----
-    # Least-squares: (2T × n_b) @ (n_b × n_comp) ≈ (2T × n_comp)
-    # Works when 2T >> n_b (overdetermined); gives unique minimum-norm solution.
-    W, _, _, _ = np.linalg.lstsq(X_b_arr.T, Z_a.T, rcond=None)  # W: (n_b × n_comp)
+    # Least-squares with intercept: [X_b.T | 1] @ [W; b] ≈ Z_a.T
+    # The intercept absorbs any mean offset between populations.
+    X_b_aug = np.column_stack([X_b_arr.T, np.ones(X_b_arr.shape[1])])
+    W_aug, _, _, _ = np.linalg.lstsq(X_b_aug, Z_a.T, rcond=None)  # (n_b+1, n_comp)
+    W = W_aug[:-1, :]          # (n_b, n_comp) mapping weights
+    b = W_aug[-1, :]           # (n_comp,)     intercept
 
     # Class B projected into class A's PC space: (n_comp × 2T)
-    Z_b_in_a = (X_b_arr.T @ W).T
+    Z_b_in_a = (X_b_arr.T @ W + b).T
 
     # Training R² per PC
     r2_per_pc = []
@@ -1421,8 +1648,11 @@ def cross_class_project(result_a, result_b, window=150, event_idx=600, dt=0.01,
         X_b_test   = X_b_arr[:, test_mask]
         Z_a_test   = Z_a[:, test_mask]
 
-        W_fold, _, _, _ = np.linalg.lstsq(X_b_train.T, Z_a_train.T, rcond=None)
-        Z_pred_test = (X_b_test.T @ W_fold).T  # (n_comp, n_test)
+        X_b_train_aug = np.column_stack([X_b_train.T, np.ones(X_b_train.shape[1])])
+        W_fold_aug, _, _, _ = np.linalg.lstsq(X_b_train_aug, Z_a_train.T, rcond=None)
+        W_fold = W_fold_aug[:-1, :]
+        b_fold = W_fold_aug[-1, :]
+        Z_pred_test = (X_b_test.T @ W_fold + b_fold).T  # (n_comp, n_test)
 
         fold_r2 = []
         for k in range(Z_a.shape[0]):
