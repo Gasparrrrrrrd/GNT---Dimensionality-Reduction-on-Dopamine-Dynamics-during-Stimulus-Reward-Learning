@@ -151,7 +151,8 @@ def fit_pca(X, n_components=3):
     Returns the fitted sklearn PCA object.
     """
     pca = PCA(n_components=n_components)
-    pca.fit(X.T if hasattr(X, 'T') else X.T)
+    X_arr = X.values if hasattr(X, 'values') else np.asarray(X)
+    pca.fit(X_arr.T)
     return pca
 
 
@@ -159,26 +160,52 @@ def project_onto_pca(pca, X):
     """Project data X onto a previously fitted PCA basis.
 
     X must have the same number of rows (neurons/features) as the
-    data used to fit pca.
+    data used to fit pca.  pca.mean_ (per-neuron temporal mean of the
+    training data) is subtracted before projecting.  For z-scored data
+    pca.mean_ ≈ 0, so results are numerically unchanged within-dataset,
+    but the subtraction is essential for correctness when pca was fitted
+    on a *different* dataset (cross-dataset projection).
 
     Returns:
         projections: np.ndarray of shape (n_components, n_columns)
     """
     X_arr = X.values if hasattr(X, 'values') else np.asarray(X)
-    return pca.components_ @ X_arr
+    return pca.components_ @ (X_arr - pca.mean_[:, np.newaxis])
 
 
 def align_pca_signs(pca_target, pca_reference):
-    """Flip component signs of pca_target to maximize correlation with
-    pca_reference components. Modifies pca_target in-place.
+    """Optimally permute and sign-flip pca_target's components to align with
+    pca_reference.  Modifies pca_target in-place.
 
-    This addresses PCA's inherent sign ambiguity when comparing across
-    datasets.
+    Why permutation matters: PCA orders components by decreasing variance,
+    which differs across datasets.  Index-based matching (PC1↔PC1) fails when
+    the leading variance axis is different (e.g. reward dynamics dominate
+    ToneFB-PC1 while direction dominates SpontFB-PC1).
+
+    Algorithm:
+      1. Build cross-Gram matrix M = target.components_ @ reference.components_.T
+         (shape n_comp × n_comp); M[i,j] = dot between target PC-i and ref PC-j.
+      2. Use the Hungarian algorithm on −|M| to find the optimal bijection
+         (permute target rows to maximise |alignment| with reference rows).
+      3. Sign-flip each matched pair so their dot product is positive.
+
+    Returns the modified pca_target and the permutation array.
     """
-    for i in range(pca_target.n_components):
-        if np.dot(pca_target.components_[i], pca_reference.components_[i]) < 0:
-            pca_target.components_[i] *= -1
-    return pca_target
+    from scipy.optimize import linear_sum_assignment
+
+    M = pca_target.components_ @ pca_reference.components_.T  # (n_comp, n_comp)
+    row_ind, col_ind = linear_sum_assignment(-np.abs(M))
+
+    # Build reordered components (col_ind[i] = which target row maps to ref row i)
+    new_components = pca_target.components_[col_ind].copy()
+
+    # Sign-flip so each matched dot product is positive
+    for i, j in enumerate(col_ind):
+        if M[j, i] < 0:
+            new_components[i] *= -1
+
+    pca_target.components_ = new_components
+    return pca_target, col_ind
 
 
 def run_pca(X, n_components=3):
@@ -244,10 +271,14 @@ def slice_window(projections, timesteps, event_idx=600, window=120, dt=0.01):
 EPOCHS = {
     'pre_tone':       {'dataset': 'ToneFB', 'start': 450, 'end': 600,
                        'desc': 'Baseline before CS'},
-    'tone_to_reward': {'dataset': 'ToneFB', 'start': 600, 'end': 750,
-                       'desc': 'CS processing period'},
+    # NOTE: 'cs_period' ends exactly at reward delivery (idx 700 = tone + 100).
+    # Previously named 'tone_to_reward' with end=750, which overlapped 'post_reward'
+    # by 50 timesteps (700-749) — that caused artificially inflated cross-epoch R²
+    # between these two epochs.  Now they are strictly non-overlapping.
+    'cs_period':      {'dataset': 'ToneFB', 'start': 600, 'end': 700,
+                       'desc': 'CS processing window (tone onset → reward delivery)'},
     'post_reward':    {'dataset': 'ToneFB', 'start': 700, 'end': 850,
-                       'desc': 'Reward response'},
+                       'desc': 'Reward response (reward delivery onward)'},
     'pre_CR':         {'dataset': 'CRFB',   'start': 450, 'end': 600,
                        'desc': 'Activity before movement'},
     'during_CR':      {'dataset': 'CRFB',   'start': 525, 'end': 675,
@@ -283,11 +314,16 @@ def compute_trajectory_metrics(smooth_data, window_data, dt=0.01):
         fwd_arc_length: float
         bwd_arc_length: float
         separation: (n_plot,) fwd-bwd Euclidean distance
-        mean_separation: float
+        mean_separation: float — mean over ALL timepoints (includes pre-event)
+        peak_separation: float — maximum separation across all timepoints
+        post_event_mean_separation: float — mean separation strictly after
+            t=0 (event onset), the scientifically relevant window for testing
+            whether the two conditions diverge post-stimulus.
         plot_time: time axis from window_data
     """
     fwd = smooth_data['fwd_smooth']  # (n_comp, n_plot)
     bwd = smooth_data['bwd_smooth']
+    plot_time = window_data['plot_time']
 
     def _speed(traj):
         diff = np.diff(traj, axis=1) / dt
@@ -320,6 +356,11 @@ def compute_trajectory_metrics(smooth_data, window_data, dt=0.01):
 
     separation = np.sqrt(np.sum((fwd - bwd)**2, axis=0))
 
+    # Post-event separation: only timepoints where t >= 0
+    post_event_mask = plot_time >= 0
+    post_sep = separation[post_event_mask]
+    post_event_mean_sep = float(np.mean(post_sep)) if post_sep.size > 0 else float(np.mean(separation))
+
     return {
         'fwd_speed': fwd_speed,
         'bwd_speed': bwd_speed,
@@ -329,24 +370,130 @@ def compute_trajectory_metrics(smooth_data, window_data, dt=0.01):
         'bwd_arc_length': _arc_length(bwd),
         'separation': separation,
         'mean_separation': float(np.mean(separation)),
-        'plot_time': window_data['plot_time'],
+        'peak_separation': float(np.max(separation)),
+        'post_event_mean_separation': post_event_mean_sep,
+        'plot_time': plot_time,
     }
 
 
 def compute_reconstruction_r2(pca, X):
-    """R-squared: fraction of variance in X captured by the PCA basis.
+    """R-squared: fraction of temporal variance in X captured by the PCA basis.
 
     Projects X into the PCA subspace and back, then computes
     1 - SS_residual / SS_total.
+
+    SS_total uses the *per-neuron* temporal mean (axis=1), which matches what
+    PCA actually optimises and is invariant to the absolute firing-rate baseline
+    of the projected dataset.  The previous implementation used the global
+    scalar mean, which inflated SS_total with inter-neuron variance and gave
+    misleading values for cross-dataset projections.
     """
     X_arr = X.values if hasattr(X, 'values') else np.asarray(X)
-    X_projected = pca.components_ @ X_arr           # (n_comp, n_time)
+    # Mean-correct using pca.mean_ (training-data per-neuron mean) before
+    # projecting, consistent with project_onto_pca().
+    X_centered = X_arr - pca.mean_[:, np.newaxis]
+    X_projected = pca.components_ @ X_centered      # (n_comp, n_time)
     X_reconstructed = pca.components_.T @ X_projected  # (n_neurons, n_time)
-    ss_res = np.sum((X_arr - X_reconstructed) ** 2)
-    ss_tot = np.sum((X_arr - X_arr.mean()) ** 2)
+    ss_res = np.sum((X_centered - X_reconstructed) ** 2)
+    # SS_total: total variance after removing each neuron's own temporal mean.
+    # For z-scored data this equals n_neurons × n_timepoints.
+    ss_tot = np.sum(X_centered ** 2)
     if ss_tot == 0:
         return 1.0
     return float(1.0 - ss_res / ss_tot)
+
+
+def compute_pc_behavioral_correlation(projections, timesteps, window, event_idx,
+                                       force_fwd=None, force_bwd=None,
+                                       lick_fwd=None, lick_bwd=None, dt=0.01):
+    """Correlate each PC time-course with behavioral traces (force / lick rate).
+
+    This function quantitatively links PC axes to behavioral variables,
+    providing statistical grounding for the interpretation that a given PC
+    encodes kinematics rather than reward.
+
+    *** DATA AVAILABILITY NOTE ***
+    Behavioral traces (force, lick rate) are recorded per-trial and have not
+    yet been matched to the per-neuron trial-averaged firing rates used for PCA.
+    Once per-trial behavioral data is aligned to the same trials and time-base
+    as the z-scored firing rates, pass the trial-averaged force/lick traces
+    (shape: n_timesteps) as ``force_fwd`` / ``force_bwd`` / ``lick_fwd`` /
+    ``lick_bwd``.
+
+    Args:
+        projections: np.ndarray (n_components, 2*timesteps) — output of
+            project_onto_pca().
+        timesteps: int — number of timepoints per half.
+        window: int — half-window size in samples (same as slice_window).
+        event_idx: int — event position within each half (default 600).
+        force_fwd: 1-D array of length timesteps (trial-averaged force, forward
+            condition). Pass None until data are available.
+        force_bwd: same for backward condition.
+        lick_fwd: 1-D array of length timesteps (trial-averaged lick rate, fwd).
+        lick_bwd: same for backward condition.
+        dt: float — seconds per timestep.
+
+    Returns:
+        pd.DataFrame with columns ['PC', 'condition', 'variable', 'r', 'p']
+        when behavioral data are provided, or None with a NotImplementedError
+        warning when all behavioral inputs are None.
+    """
+    from scipy.stats import pearsonr
+
+    behavioral_vars = {
+        'force_fwd':  force_fwd,
+        'force_bwd':  force_bwd,
+        'lick_fwd':   lick_fwd,
+        'lick_bwd':   lick_bwd,
+    }
+    if all(v is None for v in behavioral_vars.values()):
+        logger.warning(
+            "compute_pc_behavioral_correlation: no behavioral traces provided. "
+            "Per-trial force/lick data must be aligned to the z-scored firing "
+            "rates before this analysis can run.  Returning None."
+        )
+        return None
+
+    # Slice projections to the same window used for trajectory visualisation
+    fwd_start = event_idx - window
+    fwd_end   = event_idx + window + 1
+    bwd_start = timesteps + event_idx - window
+    bwd_end   = timesteps + event_idx + window + 1
+
+    pc_fwd = projections[:, fwd_start:fwd_end]   # (n_comp, 2*window+1)
+    pc_bwd = projections[:, bwd_start:bwd_end]
+
+    n_comp = projections.shape[0]
+    records = []
+
+    for cond_label, pc_half, beh_label, beh_trace in [
+        ('fwd', pc_fwd, 'force', force_fwd),
+        ('bwd', pc_bwd, 'force', force_bwd),
+        ('fwd', pc_fwd, 'lick',  lick_fwd),
+        ('bwd', pc_bwd, 'lick',  lick_bwd),
+    ]:
+        if beh_trace is None:
+            continue
+        beh_arr = np.asarray(beh_trace)
+        # Slice behavioral trace to the same window
+        beh_win = beh_arr[event_idx - window: event_idx + window + 1]
+        if len(beh_win) != pc_half.shape[1]:
+            logger.warning(
+                f"Behavioral trace length {len(beh_win)} does not match "
+                f"PC window length {pc_half.shape[1]} — skipping {cond_label}/{beh_label}."
+            )
+            continue
+        for k in range(n_comp):
+            r, p = pearsonr(pc_half[k], beh_win)
+            records.append({
+                'PC': f'PC{k+1}',
+                'condition': cond_label,
+                'variable': beh_label,
+                'r': round(float(r), 4),
+                'p': float(p),
+            })
+
+    return pd.DataFrame(records) if records else None
 
 
 def compute_subspace_overlap(components_a, components_b):
@@ -397,6 +544,295 @@ def compute_cross_correlation(timecourse_a, timecourse_b, dt=0.01):
     n = len(a)
     lags = np.arange(-(n - 1), n) * dt
     return lags, corr
+
+
+# ===========================================================================
+# RSA: Representational Similarity Analysis
+# ===========================================================================
+
+def compute_rdm(X, metric='correlation'):
+    """Compute Representational Dissimilarity Matrix from population vectors.
+
+    Each column of X is a population vector at one timepoint.
+    The RDM is a symmetric (n_timepoints x n_timepoints) matrix where
+    entry (i, j) measures dissimilarity between the population vectors
+    at timepoints i and j.
+
+    Args:
+        X: np.ndarray of shape (n_features, n_timepoints).
+           For raw neural data, n_features = n_neurons.
+           For PCA projections, n_features = n_components.
+        metric: str, one of 'correlation', 'euclidean', 'cosine'.
+            'correlation' uses 1 - Pearson r (standard RSA choice, scale-
+            invariant — appropriate for z-scored data).
+            'euclidean' uses pairwise Euclidean distance.
+            'cosine' uses 1 - cosine similarity.
+
+    Returns:
+        rdm: np.ndarray of shape (n_timepoints, n_timepoints), symmetric,
+             zero diagonal.
+    """
+    from scipy.spatial.distance import pdist, squareform
+
+    X_arr = X.values if hasattr(X, 'values') else np.asarray(X)
+    # pdist expects (n_observations, n_features): each row = one timepoint
+    X_T = X_arr.T  # (n_timepoints, n_features)
+
+    if metric not in ('correlation', 'euclidean', 'cosine'):
+        raise ValueError(
+            f"Unknown metric '{metric}'. Use 'correlation', 'euclidean', or 'cosine'."
+        )
+
+    rdm = squareform(pdist(X_T, metric=metric))
+
+    # Guard: if any timepoint has zero variance across features,
+    # correlation is undefined → NaN.  Replace with 1.0 (max dissimilarity).
+    if metric == 'correlation' and np.any(np.isnan(rdm)):
+        logger.warning(
+            "compute_rdm: NaN values in correlation RDM (likely zero-variance "
+            "timepoints). Replacing NaN with 1.0 (max dissimilarity)."
+        )
+        rdm = np.nan_to_num(rdm, nan=1.0)
+
+    np.fill_diagonal(rdm, 0.0)
+    return rdm
+
+
+def compute_rsa(rdm_a, rdm_b, method='spearman', n_permutations=10000):
+    """Compare two RDMs using Representational Similarity Analysis.
+
+    Extracts the upper triangle of each RDM (excluding diagonal) and
+    computes the correlation between them.  Significance is assessed via
+    a Mantel permutation test (row/column shuffle of one RDM).
+
+    **Caveat — temporal autocorrelation**: neural timeseries are strongly
+    autocorrelated, so adjacent rows/columns of the RDM are not independent.
+    The Mantel test can therefore be anti-conservative.  Always report the
+    effect size (r) alongside p, and consider subsampling every k-th
+    timepoint as a robustness check.
+
+    Args:
+        rdm_a: np.ndarray (T x T) — first RDM.
+        rdm_b: np.ndarray (T x T) — second RDM (must be same shape).
+        method: 'spearman' (default, rank correlation) or 'pearson'.
+        n_permutations: int — number of permutations for significance test.
+            Set to 0 to skip the permutation test (returns p=NaN).
+
+    Returns:
+        r_observed: float — observed correlation between RDM upper triangles.
+        p_value: float — Mantel test p-value (proportion of permuted r >=
+            observed r).
+    """
+    from scipy.stats import spearmanr, pearsonr
+
+    if rdm_a.shape != rdm_b.shape:
+        raise ValueError(
+            f"RDM shapes must match: {rdm_a.shape} vs {rdm_b.shape}"
+        )
+
+    triu_idx = np.triu_indices(rdm_a.shape[0], k=1)
+    vec_a = rdm_a[triu_idx]
+    vec_b = rdm_b[triu_idx]
+
+    if method == 'spearman':
+        r_observed, _ = spearmanr(vec_a, vec_b)
+    elif method == 'pearson':
+        r_observed, _ = pearsonr(vec_a, vec_b)
+    else:
+        raise ValueError(f"Unknown method '{method}'. Use 'spearman' or 'pearson'.")
+
+    if n_permutations <= 0:
+        return float(r_observed), float('nan')
+
+    # Mantel permutation test: shuffle rows AND columns simultaneously
+    count_ge = 0
+    n = rdm_a.shape[0]
+    corr_fn = spearmanr if method == 'spearman' else pearsonr
+    for _ in range(n_permutations):
+        perm = np.random.permutation(n)
+        rdm_b_perm = rdm_b[np.ix_(perm, perm)]
+        vec_b_perm = rdm_b_perm[triu_idx]
+        r_perm, _ = corr_fn(vec_a, vec_b_perm)
+        if r_perm >= r_observed:
+            count_ge += 1
+
+    p_value = (count_ge + 1) / (n_permutations + 1)
+    return float(r_observed), float(p_value)
+
+
+def compute_procrustes_comparison(smooth_data_a, smooth_data_b,
+                                   directions=('fwd', 'bwd', 'both')):
+    """Batch Procrustes comparison between two sets of smoothed trajectories.
+
+    Compares forward↔forward, backward↔backward, and/or both concatenated.
+    Uses the existing ``compute_procrustes_distance`` function.
+
+    Note: ``scipy.spatial.procrustes`` normalises both matrices to unit
+    Frobenius norm, so Procrustes disparity measures *shape* similarity
+    only, not amplitude.  Complements ``mean_separation`` which captures
+    scale.
+
+    Args:
+        smooth_data_a: dict with 'fwd_smooth', 'bwd_smooth' (n_comp × n_plot)
+        smooth_data_b: dict with 'fwd_smooth', 'bwd_smooth' (n_comp × n_plot)
+        directions: tuple of which comparisons to make.
+            'fwd': forward trajectories only.
+            'bwd': backward trajectories only.
+            'both': concatenate fwd+bwd and compare as single trajectory.
+
+    Returns:
+        dict of {direction: {'disparity': float,
+                             'aligned_a': array, 'aligned_b': array}}
+    """
+    out = {}
+
+    if 'fwd' in directions:
+        d, a, b = compute_procrustes_distance(
+            smooth_data_a['fwd_smooth'], smooth_data_b['fwd_smooth']
+        )
+        out['fwd'] = {'disparity': d, 'aligned_a': a, 'aligned_b': b}
+
+    if 'bwd' in directions:
+        d, a, b = compute_procrustes_distance(
+            smooth_data_a['bwd_smooth'], smooth_data_b['bwd_smooth']
+        )
+        out['bwd'] = {'disparity': d, 'aligned_a': a, 'aligned_b': b}
+
+    if 'both' in directions:
+        traj_a = np.hstack([smooth_data_a['fwd_smooth'],
+                            smooth_data_a['bwd_smooth']])
+        traj_b = np.hstack([smooth_data_b['fwd_smooth'],
+                            smooth_data_b['bwd_smooth']])
+        d, a, b = compute_procrustes_distance(traj_a, traj_b)
+        out['both'] = {'disparity': d, 'aligned_a': a, 'aligned_b': b}
+
+    return out
+
+
+# ===========================================================================
+# Visualization: RDM heatmap
+# ===========================================================================
+
+def plot_rdm(rdm, title="RDM", time_axis=None, cmap='viridis',
+             vmin=None, vmax=None):
+    """Plot a Representational Dissimilarity Matrix as a heatmap.
+
+    Args:
+        rdm: np.ndarray (T x T).
+        title: str.
+        time_axis: np.ndarray (T,) — optional time values for axis labels.
+        cmap: str — matplotlib colormap.
+        vmin, vmax: float — colorbar range (auto-scales if None).
+
+    Returns:
+        fig: matplotlib Figure
+    """
+    fig, ax = plt.subplots(figsize=(8, 7))
+
+    if time_axis is not None:
+        extent = [time_axis[0], time_axis[-1], time_axis[-1], time_axis[0]]
+        im = ax.imshow(rdm, cmap=cmap, aspect='auto', extent=extent,
+                       vmin=vmin, vmax=vmax)
+        ax.set_xlabel('Time (s)', fontsize=12)
+        ax.set_ylabel('Time (s)', fontsize=12)
+    else:
+        im = ax.imshow(rdm, cmap=cmap, aspect='auto', vmin=vmin, vmax=vmax)
+        ax.set_xlabel('Timepoint', fontsize=12)
+        ax.set_ylabel('Timepoint', fontsize=12)
+
+    ax.set_title(title, fontsize=14)
+    fig.colorbar(im, ax=ax, label='Dissimilarity', shrink=0.8)
+    fig.tight_layout()
+    return fig
+
+
+def plot_rsa_comparison(rsa_results, title="RSA Comparison"):
+    """Bar chart of RSA similarity values with significance markers.
+
+    Args:
+        rsa_results: dict of {label: (r_value, p_value)}
+        title: str
+
+    Returns:
+        fig: matplotlib Figure
+    """
+    labels = list(rsa_results.keys())
+    # Accept both tuple (r, p) and dict {'r': ..., 'p': ...} formats
+    def _get_rp(v):
+        if isinstance(v, dict):
+            return v['r'], v['p']
+        return v[0], v[1]
+    r_values = [_get_rp(rsa_results[l])[0] for l in labels]
+    p_values = [_get_rp(rsa_results[l])[1] for l in labels]
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    colors = ['#e74c3c' if 'DA' in l or 'Dopamine' in l else
+              '#3498db' if 'GABA' in l else '#2ecc71'
+              for l in labels]
+    ax.bar(range(len(labels)), r_values, color=colors, alpha=0.8)
+
+    for i, (r, p) in enumerate(zip(r_values, p_values)):
+        if np.isnan(p):
+            marker = ''
+        elif p < 0.001:
+            marker = '***'
+        elif p < 0.01:
+            marker = '**'
+        elif p < 0.05:
+            marker = '*'
+        else:
+            marker = 'n.s.'
+        y_pos = r + 0.02 if r >= 0 else r - 0.05
+        ax.text(i, y_pos, marker, ha='center', va='bottom', fontsize=11,
+                fontweight='bold')
+
+    ax.set_xticks(range(len(labels)))
+    ax.set_xticklabels(labels, rotation=35, ha='right', fontsize=9)
+    ax.set_ylabel('RSA Correlation (r)', fontsize=12)
+    ax.set_title(title, fontsize=14)
+    ax.axhline(0, color='black', linewidth=0.5, linestyle='-')
+    ax.grid(True, alpha=0.3, axis='y')
+    fig.tight_layout()
+    return fig
+
+
+def plot_procrustes_comparison(procrustes_dict, title="Procrustes Distance Comparison"):
+    """Bar chart of Procrustes disparity values across comparisons.
+
+    Args:
+        procrustes_dict: {label: disparity_float} or
+                         {label: {'fwd': {...}, 'bwd': {...}, 'both': {...}}}
+        title: str
+
+    Returns:
+        fig: matplotlib Figure
+    """
+    flat = {}
+    for label, val in procrustes_dict.items():
+        if isinstance(val, dict) and 'disparity' not in val:
+            for direction, v in val.items():
+                disp = v['disparity'] if isinstance(v, dict) else v
+                flat[f"{label} ({direction})"] = disp
+        elif isinstance(val, dict):
+            flat[label] = val['disparity']
+        else:
+            flat[label] = val
+
+    labels = list(flat.keys())
+    values = list(flat.values())
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    colors = ['#e74c3c' if 'DA' in l or 'Dopamine' in l else
+              '#3498db' if 'GABA' in l else '#2ecc71'
+              for l in labels]
+    ax.bar(range(len(labels)), values, color=colors, alpha=0.8)
+    ax.set_xticks(range(len(labels)))
+    ax.set_xticklabels(labels, rotation=35, ha='right', fontsize=9)
+    ax.set_ylabel('Procrustes Disparity', fontsize=12)
+    ax.set_title(title, fontsize=14)
+    ax.grid(True, alpha=0.3, axis='y')
+    fig.tight_layout()
+    return fig
 
 
 # ===========================================================================
@@ -462,12 +898,15 @@ def plot_1d_pc_timecourses(window_data, smooth_data, event_markers, title,
         ax.plot(plot_time, bwd[i], color='royalblue', linewidth=2,
                 label='Backward')
 
-        # Event markers as vertical lines
+        # Event markers as vertical lines.
+        # Labels are only added in the first subplot (i == 0) to avoid
+        # duplicate legend entries across subplots.
         for marker in event_markers:
             t_event = window_data['plot_time'][marker['idx']] if marker['idx'] < len(plot_time) else None
             if t_event is not None:
                 ax.axvline(t_event, color=marker['color'], linestyle='--',
-                           linewidth=1.5, alpha=0.7, label=marker['label'])
+                           linewidth=1.5, alpha=0.7,
+                           label=marker['label'] if i == 0 else '_nolegend_')
 
         ax.set_ylabel(f'PC{i+1}', fontsize=12)
         ax.grid(True, alpha=0.3)
@@ -897,7 +1336,7 @@ def cross_project(result_fit, result_project, use_group_avg=False,
 
 
 def cross_class_project(result_a, result_b, window=150, event_idx=600, dt=0.01,
-                        sg_window=11, sg_order=3):
+                        sg_window=11, sg_order=3, n_folds=5):
     """Project class B neurons into class A's PC space via least-squares regression.
 
     Class A and class B are *different* neuron populations (different feature
@@ -913,9 +1352,9 @@ def cross_class_project(result_a, result_b, window=150, event_idx=600, dt=0.01,
     Both results **must** come from the same dataset so that the time axes are
     aligned (same trials, same timesteps).
 
-    The training R² measures how much of class A's PC temporal variance is
-    linearly predictable from class B's activity — i.e. how much shared
-    temporal structure the two populations carry.
+    R² is reported both as *training* R² (same data used to fit W, upward-
+    biased) **and** as *cross-validated* R² using k-fold splits on the time
+    axis.  The CV R² is the unbiased estimate.
 
     Scientific use-case: fit on SpontFB_DF, project SpontFB_DB.
     If the DB-backward trajectory in DF PC space resembles the DF-forward
@@ -925,9 +1364,13 @@ def cross_class_project(result_a, result_b, window=150, event_idx=600, dt=0.01,
         result_a: analyze_dataset output for the *reference* class (PC axes).
         result_b: analyze_dataset output for the *projected* class.
         window, event_idx, dt, sg_window, sg_order: same as analyze_dataset.
+        n_folds: int — number of folds for cross-validated R² (default 5).
+            Each fold holds out a contiguous block of timepoints so that the
+            temporal autocorrelation structure of neural data is preserved.
 
     Returns dict with: smooth_data, window_data, event_markers, metrics,
-        r2_train (mean R² across PCs), r2_per_pc (list[float]),
+        r2_train (mean R² across PCs, biased), r2_cv (mean cross-validated R²),
+        r2_cv_per_pc (list[float]), r2_per_pc (list[float], training),
         W (mapping matrix n_b × n_comp), fit_class, project_class, dataset.
     """
     X_a = result_a['X']
@@ -937,9 +1380,10 @@ def cross_class_project(result_a, result_b, window=150, event_idx=600, dt=0.01,
     X_a_arr = X_a.values if hasattr(X_a, 'values') else np.asarray(X_a)
     X_b_arr = X_b.values if hasattr(X_b, 'values') else np.asarray(X_b)
 
-    # Class A PC time-courses: (n_comp × 2T)
-    Z_a = pca_a.components_ @ X_a_arr
+    # Class A PC time-courses: (n_comp × 2T) — use mean-corrected projection
+    Z_a = pca_a.components_ @ (X_a_arr - pca_a.mean_[:, np.newaxis])
 
+    # ---- Full-data (training) fit ----
     # Least-squares: (2T × n_b) @ (n_b × n_comp) ≈ (2T × n_comp)
     # Works when 2T >> n_b (overdetermined); gives unique minimum-norm solution.
     W, _, _, _ = np.linalg.lstsq(X_b_arr.T, Z_a.T, rcond=None)  # W: (n_b × n_comp)
@@ -947,13 +1391,57 @@ def cross_class_project(result_a, result_b, window=150, event_idx=600, dt=0.01,
     # Class B projected into class A's PC space: (n_comp × 2T)
     Z_b_in_a = (X_b_arr.T @ W).T
 
-    # R² per PC (training fit quality)
+    # Training R² per PC
     r2_per_pc = []
     for k in range(Z_a.shape[0]):
         ss_tot = float(np.sum((Z_a[k] - Z_a[k].mean()) ** 2))
         ss_res = float(np.sum((Z_a[k] - Z_b_in_a[k]) ** 2))
         r2_per_pc.append(1.0 - ss_res / (ss_tot + 1e-12))
     r2_train = float(np.mean(r2_per_pc))
+
+    # ---- Cross-validated R² (k-fold, contiguous time blocks) ----
+    # Splits are on the time axis so autocorrelation within a block is
+    # preserved.  Each fold trains on the rest and evaluates on the held-out
+    # block.
+    n_time = X_b_arr.shape[1]   # 2T
+    fold_size = n_time // n_folds
+    cv_r2_folds = []  # shape: (n_folds, n_comp)
+
+    for fold in range(n_folds):
+        test_start = fold * fold_size
+        test_end   = test_start + fold_size if fold < n_folds - 1 else n_time
+
+        # Boolean masks
+        test_mask  = np.zeros(n_time, dtype=bool)
+        test_mask[test_start:test_end] = True
+        train_mask = ~test_mask
+
+        X_b_train = X_b_arr[:, train_mask]   # (n_b, n_train)
+        Z_a_train  = Z_a[:, train_mask]       # (n_comp, n_train)
+        X_b_test   = X_b_arr[:, test_mask]
+        Z_a_test   = Z_a[:, test_mask]
+
+        W_fold, _, _, _ = np.linalg.lstsq(X_b_train.T, Z_a_train.T, rcond=None)
+        Z_pred_test = (X_b_test.T @ W_fold).T  # (n_comp, n_test)
+
+        fold_r2 = []
+        for k in range(Z_a.shape[0]):
+            ss_tot = float(np.sum((Z_a_test[k] - Z_a_test[k].mean()) ** 2))
+            ss_res = float(np.sum((Z_a_test[k] - Z_pred_test[k]) ** 2))
+            fold_r2.append(1.0 - ss_res / (ss_tot + 1e-12))
+        cv_r2_folds.append(fold_r2)
+
+    cv_r2_arr = np.array(cv_r2_folds)          # (n_folds, n_comp)
+    r2_cv_per_pc = cv_r2_arr.mean(axis=0).tolist()
+    r2_cv_per_pc_std = cv_r2_arr.std(axis=0).tolist()
+    r2_cv = float(np.mean(r2_cv_per_pc))
+
+    if r2_train - r2_cv > 0.1:
+        logger.warning(
+            f"cross_class_project: large gap between training R² ({r2_train:.3f}) "
+            f"and CV R² ({r2_cv:.3f}) — mapping may be overfit.  "
+            f"Consider reducing n_b or interpreting the CV value."
+        )
 
     timesteps = result_a['timesteps']
     win_data = slice_window(Z_b_in_a, timesteps, event_idx, window, dt)
@@ -971,6 +1459,9 @@ def cross_class_project(result_a, result_b, window=150, event_idx=600, dt=0.01,
         'metrics': metrics,
         'r2_train': r2_train,
         'r2_per_pc': r2_per_pc,
+        'r2_cv': r2_cv,
+        'r2_cv_per_pc': r2_cv_per_pc,
+        'r2_cv_per_pc_std': r2_cv_per_pc_std,
         'W': W,
         'fit_class': result_a['config']['combo_label'],
         'project_class': result_b['config']['combo_label'],
@@ -1030,7 +1521,7 @@ def get_epoch_event_markers(dataset_name, epoch_start, epoch_end):
 
 
 def analyze_epoch(data, neuron_groups, dataset_name, combo_label,
-                  epoch_name, epoch_start, epoch_end, timesteps,
+                  epoch_name, epoch_start, epoch_end,
                   n_components=3, dt=0.01, sg_window=11, sg_order=3):
     """Run PCA on a specific time epoch within a dataset.
 
@@ -1125,7 +1616,6 @@ def save_epoch_trajectories(datasets_config, neuron_combos, epochs_config,
                     ep_result = analyze_epoch(
                         data, groups, ds_name, combo_name,
                         ep_name, ep_cfg['start'], ep_cfg['end'],
-                        timesteps=None,  # extracted inside
                         n_components=n_components, dt=dt,
                         sg_window=sg_window, sg_order=sg_order,
                     )
@@ -1165,6 +1655,94 @@ def save_epoch_trajectories(datasets_config, neuron_combos, epochs_config,
                     logger.warning(f"PNG export failed for {fpath}: {e}")
 
     return saved_files
+
+
+# ===========================================================================
+# Sub-population selectivity comparison (Issue 12)
+# ===========================================================================
+
+def compare_selectivity_subpopulations(mat_file, var_name, dataset_name,
+                                        all_groups, selective_groups,
+                                        n_components=3, event_idx=600,
+                                        window=150, dt=0.01,
+                                        sg_window=11, sg_order=3):
+    """Compare PCA structure between direction-selective-only and full populations.
+
+    Tests whether including direction-non-selective neurons (D, DFB) dilutes
+    the directional structure in PC space.  Runs PCA independently on:
+
+        1. ``selective_groups`` — e.g. ['DF', 'DB'] (pure direction-selective)
+        2. ``selective_groups + mixed`` — e.g. ['DF', 'DB', 'DFB']
+        3. ``all_groups``          — e.g. ['DF', 'DB', 'D', 'DFB'] (full combo)
+
+    and returns a summary DataFrame with EVR and post-event separation for
+    each sub-population, making it easy to see whether unclassified or mixed-
+    selectivity neurons add or remove directional structure.
+
+    Args:
+        mat_file: str — path to .mat file.
+        var_name: str — variable name within the .mat file.
+        dataset_name: str — e.g. 'SpontFB'.
+        all_groups: list[str] — full group list, e.g. ['DF','DB','D','DFB'].
+        selective_groups: list[str] — direction-selective subset, e.g. ['DF','DB'].
+        n_components, event_idx, window, dt, sg_window, sg_order: as elsewhere.
+
+    Returns:
+        summary_df: pd.DataFrame with columns:
+            subpopulation, groups, n_neurons, evr_pc1, evr_pc2, evr_pc3,
+            evr_total, peak_separation, post_event_mean_separation
+        results: dict keyed by subpopulation label -> analyze_dataset output
+    """
+    data = load_dataset(mat_file, var_name)
+
+    # Build sub-population definitions
+    non_selective = [g for g in all_groups if g not in selective_groups]
+    mixed_groups   = [g for g in non_selective if g.endswith('FB') or g.endswith('fb')]
+    unclassified   = [g for g in non_selective if g not in mixed_groups]
+
+    subpops = {'selective_only': selective_groups}
+    if mixed_groups:
+        subpops['selective_and_mixed'] = selective_groups + mixed_groups
+    subpops['all'] = all_groups
+
+    records = []
+    results = {}
+
+    for label, groups in subpops.items():
+        # Filter to groups that actually exist in data
+        available = list(data['firing_rate'].keys())
+        groups_present = [g for g in groups if g in available]
+        if not groups_present:
+            logger.warning(f"compare_selectivity_subpopulations: no groups available for '{label}', skipping.")
+            continue
+        try:
+            res = analyze_dataset(
+                mat_file, var_name, dataset_name, groups_present,
+                combo_label=label, n_components=n_components,
+                event_idx=event_idx, window=window, dt=dt,
+                sg_window=sg_window, sg_order=sg_order,
+            )
+        except Exception as e:
+            logger.warning(f"compare_selectivity_subpopulations: '{label}' failed: {e}")
+            continue
+
+        evr = res['explained_variance_ratio']
+        m   = res['metrics']
+        records.append({
+            'subpopulation':            label,
+            'groups':                   '+'.join(groups_present),
+            'n_neurons':                res['n_neurons'],
+            'evr_pc1':                  evr[0] if len(evr) > 0 else None,
+            'evr_pc2':                  evr[1] if len(evr) > 1 else None,
+            'evr_pc3':                  evr[2] if len(evr) > 2 else None,
+            'evr_total':                sum(evr),
+            'peak_separation':          m['peak_separation'],
+            'post_event_mean_separation': m['post_event_mean_separation'],
+        })
+        results[label] = res
+
+    summary_df = pd.DataFrame(records)
+    return summary_df, results
 
 
 # ===========================================================================

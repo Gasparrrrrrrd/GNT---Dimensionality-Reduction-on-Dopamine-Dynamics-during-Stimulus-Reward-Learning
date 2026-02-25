@@ -108,9 +108,14 @@ def run_pca(X, n_components=3):
         explained_variance_ratio: list of floats
     """
     pca = PCA(n_components=n_components)
-    pca.fit(X.T)
+    X_arr = X.values if hasattr(X, 'values') else np.asarray(X)
+    pca.fit(X_arr.T)
     components = pca.components_
-    projections = np.array(components @ X)
+    # Subtract pca.mean_ (per-neuron temporal mean of the training data) before
+    # projecting.  For z-scored data pca.mean_ ≈ 0, so the result is numerically
+    # unchanged within-dataset, but the subtraction is required for correctness
+    # when this projection formula is reused on cross-dataset data.
+    projections = components @ (X_arr - pca.mean_[:, np.newaxis])
     return projections, components, list(pca.explained_variance_ratio_)
 
 
