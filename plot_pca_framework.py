@@ -595,18 +595,23 @@ def compute_rdm(X, metric='correlation'):
         rdm: np.ndarray of shape (n_timepoints, n_timepoints), symmetric,
              zero diagonal.
     """
-    from scipy.spatial.distance import pdist, squareform
-
+    import rsatoolbox
     X_arr = X.values if hasattr(X, 'values') else np.asarray(X)
-    # pdist expects (n_observations, n_features): each row = one timepoint
+    # rsatoolbox expects (n_observations, n_features): each row = one timepoint
     X_T = X_arr.T  # (n_timepoints, n_features)
 
-    if metric not in ('correlation', 'euclidean', 'cosine'):
-        raise ValueError(
-            f"Unknown metric '{metric}'. Use 'correlation', 'euclidean', or 'cosine'."
-        )
+    # Map metric names to rsatoolbox
+    metric_map = {
+        'correlation': 'correlation',
+        'euclidean': 'euclidean',
+        'cosine': 'cosine',
+    }
+    if metric not in metric_map:
+        raise ValueError(f"Unknown metric '{metric}'. Use 'correlation', 'euclidean', or 'cosine'.")
 
-    rdm = squareform(pdist(X_T, metric=metric))
+    ds = rsatoolbox.data.Dataset(X_T)
+    rdm_obj = rsatoolbox.rdm.calc_rdm(ds, method=metric_map[metric])
+    rdm = rdm_obj.get_matrices()[0]
 
     # Guard: if any timepoint has zero variance across features,
     # correlation is undefined → NaN.  Replace with 1.0 (max dissimilarity).
@@ -621,67 +626,212 @@ def compute_rdm(X, metric='correlation'):
     return rdm
 
 
-def compute_rsa(rdm_a, rdm_b, method='spearman', n_permutations=10000):
-    """Compare two RDMs using Representational Similarity Analysis.
+def compare_rdms(rdm_a, rdm_b, method='cosine'):
+    """Compare two RDMs using rsatoolbox.rdm.compare.
 
-    Extracts the upper triangle of each RDM (excluding diagonal) and
-    computes the correlation between them.  Significance is assessed via
-    a Mantel permutation test (row/column shuffle of one RDM).
-
-    **Caveat — temporal autocorrelation**: neural timeseries are strongly
-    autocorrelated, so adjacent rows/columns of the RDM are not independent.
-    The Mantel test can therefore be anti-conservative.  Always report the
-    effect size (r) alongside p, and consider subsampling every k-th
-    timepoint as a robustness check.
+    Thin wrapper that accepts raw numpy matrices and returns a scalar
+    similarity value.
 
     Args:
-        rdm_a: np.ndarray (T x T) — first RDM.
-        rdm_b: np.ndarray (T x T) — second RDM (must be same shape).
-        method: 'spearman' (default, rank correlation) or 'pearson'.
-        n_permutations: int — number of permutations for significance test.
-            Set to 0 to skip the permutation test (returns p=NaN).
+        rdm_a: np.ndarray (T x T) — first dissimilarity matrix.
+        rdm_b: np.ndarray (T x T) — second dissimilarity matrix (same size).
+        method: str — rsatoolbox comparison method.
+            Recommended: 'cosine' (sensitive to scale), 'corr' (Pearson,
+            scale-invariant), 'rho-a' (rank-based, handles ties).
 
     Returns:
-        r_observed: float — observed correlation between RDM upper triangles.
-        p_value: float — Mantel test p-value (proportion of permuted r >=
-            observed r).
+        float: similarity between the two RDMs.
     """
-    from scipy.stats import spearmanr, pearsonr
+    import rsatoolbox
 
     if rdm_a.shape != rdm_b.shape:
         raise ValueError(
             f"RDM shapes must match: {rdm_a.shape} vs {rdm_b.shape}"
         )
+    rdm1 = rsatoolbox.rdm.RDMs(rdm_a[np.newaxis])
+    rdm2 = rsatoolbox.rdm.RDMs(rdm_b[np.newaxis])
+    return float(rsatoolbox.rdm.compare(rdm1, rdm2, method=method)[0, 0])
 
-    triu_idx = np.triu_indices(rdm_a.shape[0], k=1)
-    vec_a = rdm_a[triu_idx]
-    vec_b = rdm_b[triu_idx]
 
-    if method == 'spearman':
-        r_observed, _ = spearmanr(vec_a, vec_b)
-    elif method == 'pearson':
-        r_observed, _ = pearsonr(vec_a, vec_b)
+def compute_rsa(results, pop_a='Dopamine', pop_b='GABA',
+                epochs=None, method='cosine', n_bootstrap=1000):
+    """Compare representational geometry of two neural populations across
+    behavioral epochs using rsatoolbox.
+
+    For each epoch in *epochs*, slices the neural data for both populations,
+    computes an RDM (via ``compute_rdm``), and measures their similarity
+    with ``rsatoolbox.rdm.compare``.  The per-epoch similarity values are
+    treated as replicates for a one-sample t-test (H0: similarity = 0).
+
+    When several epochs share the same number of timepoints (→ same-sized
+    RDMs), the function additionally runs rsatoolbox model-based inference:
+    the mean pop_a RDM becomes a ``ModelFixed``, and pop_b epoch RDMs serve
+    as the data.  ``eval_fixed`` provides point estimates; optionally
+    ``eval_bootstrap_pattern`` bootstraps over conditions (timepoints)
+    for confidence intervals.
+
+    **Caveat**: epochs from the *same* dataset are not fully independent
+    (same neurons, overlapping trial averages).  Cross-dataset epochs
+    (SpontFB vs CRFB vs ToneFB) are independent.
+
+    Args:
+        results: dict from the main pipeline, keys like 'SpontFB_Dopamine'.
+            Each value must contain 'X' (n_neurons × 2*timesteps).
+        pop_a: str — first population name (default 'Dopamine').
+        pop_b: str — second population name (default 'GABA').
+        epochs: dict of epoch configs (default: EPOCHS).  Each entry has
+            'dataset', 'start', 'end', 'desc'.  dataset='Any' expands
+            to all available datasets.
+        method: str — rsatoolbox comparison method ('cosine', 'corr',
+            'rho-a').  See ``rsatoolbox.rdm.compare`` for full list.
+        n_bootstrap: int — bootstrap iterations for eval_bootstrap_pattern.
+            Set to 0 to skip bootstrap inference.
+
+    Returns:
+        dict with keys:
+            per_epoch   — {name: {similarity, rdm_a, rdm_b, n_timepoints,
+                                   dataset, epoch_desc}}
+            similarities — np.array of per-epoch similarity values
+            epoch_names  — list of epoch names used
+            mean, std, sem — summary statistics across epochs
+            ttest        — {t, p, df} one-sample t-test vs 0
+            model_inference — {n_timepoints: {group_names, eval_fixed,
+                               eval_bootstrap, rdms_a, rdms_b}} for each
+                              group of epochs sharing the same RDM size
+            method, pop_a, pop_b — echo of input parameters
+    """
+    import rsatoolbox
+    from rsatoolbox.model import ModelFixed
+    from scipy import stats
+
+    if epochs is None:
+        epochs = EPOCHS
+
+    per_epoch = {}
+    similarities = []
+    epoch_names_used = []
+
+    for epoch_name, cfg in epochs.items():
+        dataset = cfg['dataset']
+
+        # 'Any' → try all available datasets
+        datasets_to_try = (
+            ['SpontFB', 'CRFB', 'ToneFB'] if dataset == 'Any'
+            else [dataset]
+        )
+
+        for ds in datasets_to_try:
+            key_a = f"{ds}_{pop_a}"
+            key_b = f"{ds}_{pop_b}"
+            if key_a not in results or key_b not in results:
+                continue
+
+            X_a = results[key_a]['X']
+            X_b = results[key_b]['X']
+            ts_a = X_a.shape[1] // 2
+            ts_b = X_b.shape[1] // 2
+
+            X_a_ep, _ = slice_epoch(X_a, ts_a, cfg['start'], cfg['end'])
+            X_b_ep, _ = slice_epoch(X_b, ts_b, cfg['start'], cfg['end'])
+
+            rdm_a = compute_rdm(X_a_ep)
+            rdm_b = compute_rdm(X_b_ep)
+            sim = compare_rdms(rdm_a, rdm_b, method=method)
+
+            name = (f"{epoch_name}_{ds}" if dataset == 'Any'
+                    else epoch_name)
+            per_epoch[name] = {
+                'similarity': sim,
+                'rdm_a': rdm_a,
+                'rdm_b': rdm_b,
+                'n_timepoints': cfg['end'] - cfg['start'],
+                'dataset': ds,
+                'epoch_desc': cfg['desc'],
+            }
+            similarities.append(sim)
+            epoch_names_used.append(name)
+
+    similarities = np.asarray(similarities, dtype=float)
+
+    # ---- summary stats ----
+    n = len(similarities)
+    mean = float(np.mean(similarities)) if n > 0 else float('nan')
+    std = float(np.std(similarities, ddof=1)) if n > 1 else float('nan')
+    sem = float(stats.sem(similarities)) if n > 1 else float('nan')
+
+    # ---- one-sample t-test (H0: similarity = 0) ----
+    if n >= 2:
+        t_stat, t_p = stats.ttest_1samp(similarities, 0)
+        ttest = {'t': float(t_stat), 'p': float(t_p), 'df': n - 1}
     else:
-        raise ValueError(f"Unknown method '{method}'. Use 'spearman' or 'pearson'.")
+        ttest = {'t': float('nan'), 'p': float('nan'), 'df': 0}
 
-    if n_permutations <= 0:
-        return float(r_observed), float('nan')
+    # ---- rsatoolbox model-based inference per size-group ----
+    from collections import defaultdict
+    size_groups = defaultdict(list)
+    for name, info in per_epoch.items():
+        size_groups[info['n_timepoints']].append(name)
 
-    # Mantel permutation test: shuffle rows AND columns simultaneously
-    count_ge = 0
-    n = rdm_a.shape[0]
-    corr_fn = spearmanr if method == 'spearman' else pearsonr
-    for _ in range(n_permutations):
-        perm = np.random.permutation(n)
-        rdm_b_perm = rdm_b[np.ix_(perm, perm)]
-        vec_b_perm = rdm_b_perm[triu_idx]
-        r_perm, _ = corr_fn(vec_a, vec_b_perm)
-        if r_perm >= r_observed:
-            count_ge += 1
+    model_inference = {}
+    for n_tp, group_names in size_groups.items():
+        if len(group_names) < 2:
+            continue
 
-    p_value = (count_ge + 1) / (n_permutations + 1)
-    return float(r_observed), float(p_value)
+        rdms_a_stack = np.stack([per_epoch[n]['rdm_a'] for n in group_names])
+        rdms_b_stack = np.stack([per_epoch[n]['rdm_b'] for n in group_names])
 
+        rdms_a_obj = rsatoolbox.rdm.RDMs(
+            rdms_a_stack,
+            rdm_descriptors={'epoch': group_names},
+            dissimilarity_measure='correlation',
+        )
+        rdms_b_obj = rsatoolbox.rdm.RDMs(
+            rdms_b_stack,
+            rdm_descriptors={'epoch': group_names},
+            dissimilarity_measure='correlation',
+        )
+
+        # ModelFixed: mean pop_a RDM as the model prediction
+        model = ModelFixed(f'{pop_a}_mean', rdms_a_obj.mean())
+
+        # eval_fixed: point estimate per pop_b RDM
+        result_fixed = rsatoolbox.inference.eval_fixed(
+            [model], rdms_b_obj, method=method
+        )
+
+        # eval_bootstrap_pattern: bootstrap over conditions (timepoints)
+        result_boot = None
+        if n_bootstrap > 0:
+            try:
+                result_boot = rsatoolbox.inference.eval_bootstrap_pattern(
+                    [model], rdms_b_obj, method=method, N=n_bootstrap,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Bootstrap failed for group size %d: %s", n_tp, e
+                )
+
+        model_inference[n_tp] = {
+            'group_names': group_names,
+            'eval_fixed': result_fixed,
+            'eval_bootstrap': result_boot,
+            'rdms_a': rdms_a_obj,
+            'rdms_b': rdms_b_obj,
+        }
+
+    return {
+        'per_epoch': per_epoch,
+        'similarities': similarities,
+        'epoch_names': epoch_names_used,
+        'mean': mean,
+        'std': std,
+        'sem': sem,
+        'ttest': ttest,
+        'model_inference': model_inference,
+        'method': method,
+        'pop_a': pop_a,
+        'pop_b': pop_b,
+    }
 
 def compute_procrustes_comparison(smooth_data_a, smooth_data_b,
                                    directions=('fwd', 'bwd', 'both')):
@@ -912,6 +1062,212 @@ def _cv_r2_lstsq(X_b, Z_a, n_folds):
     return float(np.mean(fold_r2s))
 
 
+def null_same_neuron_cross_r2(result_fit, result_project, n_components=3,
+                               n_permutations=500, seed=42):
+    """Null distribution for same-neuron cross-projection R².
+
+    For datasets that share the same neurons (e.g. CRFB and ToneFB),
+    tests whether the observed cross-projection R² reflects genuine
+    shared temporal covariance structure or is an artefact of
+    per-neuron autocorrelation.
+
+    Algorithm: circular time-shift null.  For each permutation,
+    independently circularly shift each neuron's time-course by a
+    random offset (separately for fwd and bwd halves of the fitting
+    dataset).  This preserves per-neuron autocorrelation and variance
+    while destroying the inter-neuron temporal alignment that PCA
+    exploits.  Re-fit PCA on shifted data, project the (un-shifted)
+    project-dataset, compute R².
+
+    Args:
+        result_fit: analyze_dataset output for the fitting dataset.
+        result_project: analyze_dataset output for the project dataset.
+        n_components: int.
+        n_permutations: number of null samples.
+        seed: int.
+
+    Returns:
+        observed_r2: float — real cross-projection R².
+        null_r2s: np.ndarray (n_permutations,).
+        p_value: float.
+    """
+    rng = np.random.default_rng(seed)
+
+    X_fit = result_fit['X']
+    X_proj = result_project['X']
+    pca_fit = result_fit['pca']
+    timesteps = result_fit['timesteps']
+
+    # Observed R²
+    observed_r2 = compute_reconstruction_r2(pca_fit, X_proj)
+
+    X_fit_arr = X_fit.values if hasattr(X_fit, 'values') else np.asarray(X_fit)
+    n_neurons, n_cols = X_fit_arr.shape
+
+    null_r2s = np.empty(n_permutations)
+    for i in range(n_permutations):
+        X_shifted = np.empty_like(X_fit_arr)
+        for neuron in range(n_neurons):
+            # Shift fwd and bwd halves independently
+            shift_fwd = rng.integers(0, timesteps)
+            shift_bwd = rng.integers(0, timesteps)
+            X_shifted[neuron, :timesteps] = np.roll(
+                X_fit_arr[neuron, :timesteps], shift_fwd)
+            X_shifted[neuron, timesteps:] = np.roll(
+                X_fit_arr[neuron, timesteps:], shift_bwd)
+
+        # Re-fit PCA on shifted data
+        pca_null = fit_pca(pd.DataFrame(X_shifted), n_components)
+        null_r2s[i] = compute_reconstruction_r2(pca_null, X_proj)
+
+    p_value = float((np.sum(null_r2s >= observed_r2) + 1) / (n_permutations + 1))
+    return observed_r2, null_r2s, p_value
+
+
+def null_reward_deflection(smooth_data_task, window_data_task,
+                            smooth_data_ctrl, window_data_ctrl,
+                            reward_offset=100, dt=0.01,
+                            test_half_width=10,
+                            n_permutations=1000, seed=42):
+    """Null model for reward-time trajectory deflection.
+
+    Tests whether the trajectory speed at reward delivery time is
+    significantly higher than expected by chance, and whether it
+    differs between a task dataset (ToneFB, where reward is delivered)
+    and a control dataset (SpontFB, no reward).
+
+    Two complementary tests:
+
+    1. **Within-dataset (circular-shift)**: Is speed at reward time
+       significantly higher than at other post-event timepoints?
+       Circularly shifts the smoothed trajectory in time and recomputes
+       speed at the reward index.  This tests whether the reward-time
+       window is special vs other timepoints given the trajectory's
+       autocorrelation structure.
+
+    2. **Between-dataset (bootstrap difference)**: Is the speed at
+       ToneFB[reward_time] significantly different from SpontFB at the
+       equivalent post-event latency?  Bootstrap-resamples timepoints
+       from the post-event period to build a null for the speed
+       difference.
+
+    Args:
+        smooth_data_task: dict with 'fwd_smooth', 'bwd_smooth' from task dataset.
+        window_data_task: dict with 'plot_time' from task dataset.
+        smooth_data_ctrl: dict with 'fwd_smooth', 'bwd_smooth' from control dataset.
+        window_data_ctrl: dict with 'plot_time' from control dataset.
+        reward_offset: int — reward delivery relative to event_idx (default 100).
+        dt: float — seconds per timestep.
+        test_half_width: int — half-width of the reward window in timesteps.
+        n_permutations: int.
+        seed: int.
+
+    Returns:
+        dict with:
+            within_task: {observed_speed, null_speeds, p_value}
+            between_datasets: {task_speed, ctrl_speed, observed_diff,
+                               null_diffs, p_value}
+    """
+    rng = np.random.default_rng(seed)
+
+    def _mean_speed_at(smooth_data, window_data, time_idx, hw):
+        """Mean speed in a window around time_idx."""
+        fwd = smooth_data['fwd_smooth']
+        bwd = smooth_data['bwd_smooth']
+        # Speed = mean of fwd and bwd speeds
+        diff_fwd = np.diff(fwd, axis=1) / dt
+        diff_bwd = np.diff(bwd, axis=1) / dt
+        speed_fwd = np.sqrt(np.sum(diff_fwd**2, axis=0))
+        speed_bwd = np.sqrt(np.sum(diff_bwd**2, axis=0))
+        speed_mean = (speed_fwd + speed_bwd) / 2.0
+        lo = max(0, time_idx - hw)
+        hi = min(len(speed_mean), time_idx + hw)
+        return float(np.mean(speed_mean[lo:hi]))
+
+    # Locate reward time index within the windowed data
+    plot_time_task = window_data_task['plot_time']
+    window_half = len(plot_time_task) // 2  # event is at this index
+    reward_idx = window_half + reward_offset  # reward relative to event
+
+    # Also locate the matched post-event index in control
+    plot_time_ctrl = window_data_ctrl['plot_time']
+    ctrl_window_half = len(plot_time_ctrl) // 2
+    ctrl_matched_idx = ctrl_window_half + reward_offset
+
+    # --- Observed speeds ---
+    task_speed = _mean_speed_at(smooth_data_task, window_data_task,
+                                reward_idx, test_half_width)
+    ctrl_speed = _mean_speed_at(smooth_data_ctrl, window_data_ctrl,
+                                ctrl_matched_idx, test_half_width)
+
+    # --- Test 1: Within-task circular shift ---
+    fwd_task = smooth_data_task['fwd_smooth']
+    bwd_task = smooth_data_task['bwd_smooth']
+    n_plot = fwd_task.shape[1]
+
+    null_speeds_within = np.empty(n_permutations)
+    for i in range(n_permutations):
+        shift = rng.integers(1, n_plot)
+        fwd_shifted = np.roll(fwd_task, shift, axis=1)
+        bwd_shifted = np.roll(bwd_task, shift, axis=1)
+        shifted_smooth = {'fwd_smooth': fwd_shifted, 'bwd_smooth': bwd_shifted}
+        null_speeds_within[i] = _mean_speed_at(
+            shifted_smooth, window_data_task, reward_idx, test_half_width)
+
+    p_within = float((np.sum(null_speeds_within >= task_speed) + 1) /
+                     (n_permutations + 1))
+
+    # --- Test 2: Between-dataset bootstrap difference ---
+    observed_diff = task_speed - ctrl_speed
+
+    # Bootstrap: resample post-event speed values from pooled task+ctrl
+    diff_fwd_task = np.diff(fwd_task, axis=1) / dt
+    diff_bwd_task = np.diff(bwd_task, axis=1) / dt
+    speed_task_all = (np.sqrt(np.sum(diff_fwd_task**2, axis=0)) +
+                      np.sqrt(np.sum(diff_bwd_task**2, axis=0))) / 2.0
+
+    fwd_ctrl = smooth_data_ctrl['fwd_smooth']
+    bwd_ctrl = smooth_data_ctrl['bwd_smooth']
+    diff_fwd_ctrl = np.diff(fwd_ctrl, axis=1) / dt
+    diff_bwd_ctrl = np.diff(bwd_ctrl, axis=1) / dt
+    speed_ctrl_all = (np.sqrt(np.sum(diff_fwd_ctrl**2, axis=0)) +
+                      np.sqrt(np.sum(diff_bwd_ctrl**2, axis=0))) / 2.0
+
+    # Post-event speeds only
+    post_mask_task = plot_time_task[:-1] >= 0  # speed has one fewer element
+    post_mask_ctrl = plot_time_ctrl[:-1] >= 0
+    post_speed_task = speed_task_all[post_mask_task]
+    post_speed_ctrl = speed_ctrl_all[post_mask_ctrl]
+
+    null_diffs = np.empty(n_permutations)
+    pooled = np.concatenate([post_speed_task, post_speed_ctrl])
+    n_task = len(post_speed_task)
+    for i in range(n_permutations):
+        idx = rng.permutation(len(pooled))
+        samp_task = pooled[idx[:n_task]]
+        samp_ctrl = pooled[idx[n_task:]]
+        null_diffs[i] = float(np.mean(samp_task[:2*test_half_width]) -
+                              np.mean(samp_ctrl[:2*test_half_width]))
+
+    p_between = float((np.sum(np.abs(null_diffs) >= np.abs(observed_diff)) + 1) /
+                      (n_permutations + 1))
+
+    return {
+        'within_task': {
+            'observed_speed': task_speed,
+            'null_speeds': null_speeds_within,
+            'p_value': p_within,
+        },
+        'between_datasets': {
+            'task_speed': task_speed,
+            'ctrl_speed': ctrl_speed,
+            'observed_diff': observed_diff,
+            'null_diffs': null_diffs,
+            'p_value': p_between,
+        },
+    }
+
+
 def _phase_randomise(X, rng):
     """Phase-randomise each row of X independently (preserves power spectrum).
 
@@ -928,7 +1284,8 @@ def _phase_randomise(X, rng):
         phases[0] = 0.0
         if n_cols % 2 == 0:
             phases[-1] = 0.0
-        freq_rand = np.abs(freq) * np.exp(1j * phases)
+        # Preserve the original sign of the FFT coefficients
+        freq_rand = np.abs(freq) * np.exp(1j * (np.angle(freq) + phases))
         X_out[r] = np.fft.irfft(freq_rand, n=n_cols)
     return X_out
 
@@ -971,21 +1328,82 @@ def plot_rdm(rdm, title="RDM", time_axis=None, cmap='viridis',
 
 
 def plot_rsa_comparison(rsa_results, title="RSA Comparison"):
-    """Bar chart of RSA similarity values with significance markers.
+    """Bar chart of RSA epoch similarities with t-test annotation.
+
+    Accepts either the new ``compute_rsa`` return dict (preferred) or a
+    legacy dict of ``{label: (r, p)}`` / ``{label: {'r': ..., 'p': ...}}``.
+
+    New format produces: one bar per epoch, error-bar = SEM across epochs,
+    horizontal line at mean, and the t-test p-value in the title.
 
     Args:
-        rsa_results: dict of {label: (r_value, p_value)}
+        rsa_results: dict — output of ``compute_rsa`` **or** legacy
+            ``{label: (r, p)}`` dict.
         title: str
 
     Returns:
         fig: matplotlib Figure
     """
+    # ---------- detect new vs legacy format ----------
+    if 'per_epoch' in rsa_results:
+        return _plot_rsa_new(rsa_results, title)
+    return _plot_rsa_legacy(rsa_results, title)
+
+
+def _plot_rsa_new(rsa, title):
+    """Plot for the new ``compute_rsa`` return dict."""
+    names = rsa['epoch_names']
+    sims = rsa['similarities']
+    mean = rsa['mean']
+    sem = rsa['sem']
+    t_info = rsa['ttest']
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+
+    # Color by dataset
+    colors = []
+    for n in names:
+        ep_info = rsa['per_epoch'][n]
+        ds = ep_info['dataset']
+        if 'Tone' in ds:
+            colors.append('#2ecc71')
+        elif 'CRFB' in ds or 'CR' in ds:
+            colors.append('#e74c3c')
+        else:
+            colors.append('#3498db')
+
+    ax.bar(range(len(names)), sims, color=colors, alpha=0.8)
+    ax.axhline(mean, color='black', linewidth=1.2, linestyle='--',
+               label=f'mean={mean:.3f}')
+    ax.fill_between([-0.5, len(names) - 0.5],
+                     mean - sem, mean + sem,
+                     color='grey', alpha=0.15, label=f'SEM={sem:.3f}')
+
+    # t-test annotation
+    p_str = (f"p={t_info['p']:.2e}" if not np.isnan(t_info['p'])
+             else 'p=N/A')
+    full_title = (f"{title}\n{rsa['pop_a']} vs {rsa['pop_b']}  |  "
+                  f"t({t_info['df']})={t_info['t']:.2f}, {p_str}")
+    ax.set_title(full_title, fontsize=12)
+
+    ax.set_xticks(range(len(names)))
+    ax.set_xticklabels(names, rotation=40, ha='right', fontsize=8)
+    ax.set_ylabel(f"RDM similarity ({rsa['method']})", fontsize=11)
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3, axis='y')
+    fig.tight_layout()
+    return fig
+
+
+def _plot_rsa_legacy(rsa_results, title):
+    """Backward-compatible plot for legacy {label: (r, p)} dicts."""
     labels = list(rsa_results.keys())
-    # Accept both tuple (r, p) and dict {'r': ..., 'p': ...} formats
+
     def _get_rp(v):
         if isinstance(v, dict):
             return v['r'], v['p']
         return v[0], v[1]
+
     r_values = [_get_rp(rsa_results[l])[0] for l in labels]
     p_values = [_get_rp(rsa_results[l])[1] for l in labels]
 
