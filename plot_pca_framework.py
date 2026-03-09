@@ -299,6 +299,11 @@ EPOCHS = {
                        'desc': 'Movement execution (early)'},
     'late_CR':        {'dataset': 'CRFB',   'start': 675, 'end': 750,
                        'desc': 'Movement execution (late)'},
+    # Combined CR epoch spanning peri_CR + post_CR.  Intentionally overlaps
+    # those sub-epochs; used only for epoch-based PCA fitting (cross-epoch
+    # contrast with cs_period), not for the cross-epoch R² matrix.
+    'during_CR':      {'dataset': 'CRFB',   'start': 525, 'end': 675,
+                       'desc': 'Full CR period (peri + post movement)'},
     'pre_spont':      {'dataset': 'SpontFB','start': 450, 'end': 600,
                        'desc': 'Baseline before spontaneous movement'},
     'post_spont':     {'dataset': 'SpontFB','start': 600, 'end': 750,
@@ -626,7 +631,7 @@ def compute_rdm(X, metric='correlation'):
     return rdm
 
 
-def compare_rdms(rdm_a, rdm_b, method='cosine'):
+def compare_rdms(rdm_a, rdm_b, method='corr'):
     """Compare two RDMs using rsatoolbox.rdm.compare.
 
     Thin wrapper that accepts raw numpy matrices and returns a scalar
@@ -636,8 +641,9 @@ def compare_rdms(rdm_a, rdm_b, method='cosine'):
         rdm_a: np.ndarray (T x T) — first dissimilarity matrix.
         rdm_b: np.ndarray (T x T) — second dissimilarity matrix (same size).
         method: str — rsatoolbox comparison method.
-            Recommended: 'cosine' (sensitive to scale), 'corr' (Pearson,
-            scale-invariant), 'rho-a' (rank-based, handles ties).
+            Options: 'corr' (Pearson, scale-invariant, default),
+            'cosine' (sensitive to scale — biased upward for high-dim RDMs),
+            'rho-a' (rank-based, handles ties).
 
     Returns:
         float: similarity between the two RDMs.
@@ -654,7 +660,7 @@ def compare_rdms(rdm_a, rdm_b, method='cosine'):
 
 
 def compute_rsa(results, pop_a='Dopamine', pop_b='GABA',
-                epochs=None, method='cosine', n_bootstrap=1000):
+                epochs=None, method='corr', n_bootstrap=1000):
     """Compare representational geometry of two neural populations across
     behavioral epochs using rsatoolbox.
 
@@ -1288,6 +1294,59 @@ def _phase_randomise(X, rng):
         freq_rand = np.abs(freq) * np.exp(1j * (np.angle(freq) + phases))
         X_out[r] = np.fft.irfft(freq_rand, n=n_cols)
     return X_out
+
+
+def null_rsa(X_a, X_b, n_permutations=500, seed=42,
+             metric='correlation', method='corr'):
+    """Null model for RSA: phase-randomise both populations independently.
+
+    Destroys cross-neuron temporal alignment while preserving each neuron's
+    autocorrelation and power spectrum.  Builds a null distribution of RDM
+    similarity values to assess whether the observed RSA is above chance.
+
+    Args:
+        X_a: np.ndarray (n_neurons_a, T) — population A (e.g. event-aligned window).
+        X_b: np.ndarray (n_neurons_b, T) — population B (same T).
+        n_permutations: int.
+        seed: int.
+        metric: str — passed to compute_rdm (default 'correlation').
+        method: str — passed to compare_rdms (default 'corr').
+
+    Returns:
+        dict with:
+            observed: float — observed RSA similarity.
+            null_values: np.ndarray (n_permutations,) — null distribution.
+            p_value: float — one-tailed (observed >= null).
+            z_score: float — (observed - null_mean) / null_std.
+    """
+    rng = np.random.default_rng(seed)
+
+    # Observed RSA
+    rdm_a = compute_rdm(X_a, metric=metric)
+    rdm_b = compute_rdm(X_b, metric=metric)
+    observed = compare_rdms(rdm_a, rdm_b, method=method)
+
+    # Null distribution
+    null_values = np.empty(n_permutations)
+    for i in range(n_permutations):
+        X_a_rand = _phase_randomise(X_a, rng)
+        X_b_rand = _phase_randomise(X_b, rng)
+        rdm_a_null = compute_rdm(X_a_rand, metric=metric)
+        rdm_b_null = compute_rdm(X_b_rand, metric=metric)
+        null_values[i] = compare_rdms(rdm_a_null, rdm_b_null, method=method)
+
+    p_value = float((np.sum(null_values >= observed) + 1) /
+                    (n_permutations + 1))
+    null_mean = float(np.mean(null_values))
+    null_std = float(np.std(null_values))
+    z_score = (observed - null_mean) / null_std if null_std > 0 else float('inf')
+
+    return {
+        'observed': float(observed),
+        'null_values': null_values,
+        'p_value': p_value,
+        'z_score': float(z_score),
+    }
 
 
 # ===========================================================================

@@ -5,19 +5,23 @@
     "DF",
     "DB",
     "GF",
-    "GB"
+    "GB",
+    "D",
+    "G",
+    "DFB",
+    "GFB"
   ],
-  "n_neurons": 383,
+  "n_neurons": 652,
   "n_components": 3,
   "explained_variance_ratio": [
-    0.18515879568320504,
-    0.06540706864129242,
-    0.036532126493400506
+    0.16019912006776474,
+    0.09019122409638938,
+    0.047219409040380814
   ],
-  "explained_variance_total": 0.28709799081789794,
+  "explained_variance_total": 0.2976097532045349,
   "parameters": {
     "event_idx": 600,
-    "window": 100,
+    "window": 120,
     "dt": 0.01,
     "sg_window": 11,
     "sg_order": 3
@@ -33,5 +37,5 @@
     "trajectory_png": "outputs\\ToneFB\\Combined\\ToneFB_Combined_trajectory.png"
   },
   "warnings": [],
-  "timestamp": "2026-02-18T15:26:22.119453"
+  "timestamp": "2026-03-04T14:04:42.207774"
 }

@@ -14,11 +14,11 @@
   "n_neurons": 832,
   "n_components": 3,
   "explained_variance_ratio": [
-    0.10597740226798764,
-    0.05358713394435605,
-    0.03438222531831056
+    0.10597740226798763,
+    0.05358713394435587,
+    0.03438222531831082
   ],
-  "explained_variance_total": 0.19394676153065424,
+  "explained_variance_total": 0.19394676153065432,
   "parameters": {
     "event_idx": 600,
     "window": 120,
@@ -36,5 +36,5 @@
     "trajectory_png": "outputs\\SpontFB\\Combined\\SpontFB_Combined_trajectory.png"
   },
   "warnings": [],
-  "timestamp": "2026-02-18T18:48:28.086574"
+  "timestamp": "2026-03-04T14:03:02.443007"
 }

@@ -3,19 +3,21 @@
   "neuron_combo": "Dopamine",
   "neuron_groups": [
     "DF",
-    "DB"
+    "DB",
+    "D",
+    "DFB"
   ],
-  "n_neurons": 314,
+  "n_neurons": 497,
   "n_components": 3,
   "explained_variance_ratio": [
-    0.23553155312099655,
-    0.03871759490869813,
-    0.02565972605887309
+    0.20892783309801105,
+    0.0380604602925305,
+    0.0291232661652381
   ],
-  "explained_variance_total": 0.29990887408856776,
+  "explained_variance_total": 0.27611155955577965,
   "parameters": {
     "event_idx": 600,
-    "window": 100,
+    "window": 120,
     "dt": 0.01,
     "sg_window": 11,
     "sg_order": 3
@@ -31,5 +33,5 @@
     "trajectory_png": "outputs\\ToneFB\\Dopamine\\ToneFB_Dopamine_trajectory.png"
   },
   "warnings": [],
-  "timestamp": "2026-02-18T15:25:38.173229"
+  "timestamp": "2026-03-04T14:04:08.606062"
 }

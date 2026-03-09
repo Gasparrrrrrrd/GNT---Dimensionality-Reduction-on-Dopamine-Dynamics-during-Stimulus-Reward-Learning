@@ -1,0 +1,1538 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dimensionality Reduction on VTA Dopamine & GABA Dynamics</title>
+    <link rel="stylesheet" href="https://api.fontshare.com/v2/css?f[]=clash-display@400;500;600;700&f[]=satoshi@400;500;700&f[]=jet-brains-mono@400&display=swap">
+    <style>
+        /* ===========================================
+           CSS CUSTOM PROPERTIES (THEME)
+           Dark scientific / neural aesthetic
+           =========================================== */
+        :root {
+            --bg-primary: #080b14;
+            --bg-secondary: #0d1221;
+            --bg-card: rgba(15, 22, 42, 0.85);
+            --text-primary: #e8edf5;
+            --text-secondary: #8b95a8;
+            --text-muted: #5a6478;
+            --accent-da: #ff6b4a;
+            --accent-gaba: #4aadff;
+            --accent-green: #3ddc84;
+            --accent-gold: #f5c542;
+            --accent-purple: #a78bfa;
+            --accent-glow-da: rgba(255, 107, 74, 0.25);
+            --accent-glow-gaba: rgba(74, 173, 255, 0.25);
+
+            --font-display: 'Clash Display', sans-serif;
+            --font-body: 'Satoshi', sans-serif;
+            --font-mono: 'JetBrains Mono', monospace;
+
+            --title-size: clamp(2rem, 5.5vw, 4.5rem);
+            --h2-size: clamp(1.3rem, 3.2vw, 2.4rem);
+            --h3-size: clamp(1rem, 2.2vw, 1.5rem);
+            --body-size: clamp(0.72rem, 1.3vw, 1.05rem);
+            --small-size: clamp(0.62rem, 0.95vw, 0.82rem);
+            --mono-size: clamp(0.6rem, 0.85vw, 0.78rem);
+
+            --slide-padding: clamp(1.2rem, 3.5vw, 3.5rem);
+            --content-gap: clamp(0.6rem, 1.8vw, 1.6rem);
+            --element-gap: clamp(0.3rem, 0.8vw, 0.7rem);
+
+            --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+            --duration-normal: 0.7s;
+        }
+
+        /* ===========================================
+           BASE STYLES
+           =========================================== */
+        *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+        html {
+            scroll-behavior: smooth;
+            scroll-snap-type: y mandatory;
+            height: 100%;
+            overflow-x: hidden;
+        }
+
+        body {
+            font-family: var(--font-body);
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            overflow-x: hidden;
+            height: 100%;
+            line-height: 1.5;
+        }
+
+        /* ===========================================
+           SLIDE CONTAINER
+           =========================================== */
+        .slide {
+            width: 100vw;
+            height: 100vh;
+            height: 100dvh;
+            overflow: hidden;
+            scroll-snap-align: start;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            position: relative;
+            padding: var(--slide-padding);
+        }
+
+        .slide-content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            max-height: 100%;
+            overflow: hidden;
+            gap: var(--content-gap);
+        }
+
+        /* ===========================================
+           BACKGROUNDS
+           =========================================== */
+        .bg-grid {
+            background-image:
+                linear-gradient(rgba(74, 173, 255, 0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(74, 173, 255, 0.03) 1px, transparent 1px);
+            background-size: 60px 60px;
+        }
+
+        .bg-gradient-da {
+            background:
+                radial-gradient(ellipse at 15% 85%, rgba(255, 107, 74, 0.08) 0%, transparent 50%),
+                radial-gradient(ellipse at 85% 15%, rgba(74, 173, 255, 0.06) 0%, transparent 50%),
+                var(--bg-primary);
+        }
+
+        .bg-gradient-gaba {
+            background:
+                radial-gradient(ellipse at 80% 80%, rgba(74, 173, 255, 0.1) 0%, transparent 50%),
+                radial-gradient(ellipse at 20% 20%, rgba(167, 139, 250, 0.06) 0%, transparent 50%),
+                var(--bg-primary);
+        }
+
+        .bg-gradient-mixed {
+            background:
+                radial-gradient(ellipse at 30% 70%, rgba(255, 107, 74, 0.06) 0%, transparent 45%),
+                radial-gradient(ellipse at 70% 30%, rgba(74, 173, 255, 0.06) 0%, transparent 45%),
+                var(--bg-primary);
+        }
+
+        .bg-gradient-green {
+            background:
+                radial-gradient(ellipse at 50% 80%, rgba(61, 220, 132, 0.08) 0%, transparent 50%),
+                var(--bg-primary);
+        }
+
+        /* ===========================================
+           TYPOGRAPHY
+           =========================================== */
+        h1 {
+            font-family: var(--font-display);
+            font-size: var(--title-size);
+            font-weight: 700;
+            line-height: 1.1;
+            letter-spacing: -0.02em;
+        }
+
+        h2 {
+            font-family: var(--font-display);
+            font-size: var(--h2-size);
+            font-weight: 600;
+            line-height: 1.2;
+            letter-spacing: -0.01em;
+        }
+
+        h3 {
+            font-family: var(--font-display);
+            font-size: var(--h3-size);
+            font-weight: 500;
+            line-height: 1.3;
+        }
+
+        p, li {
+            font-size: var(--body-size);
+            color: var(--text-secondary);
+            line-height: 1.55;
+        }
+
+        .mono {
+            font-family: var(--font-mono);
+            font-size: var(--mono-size);
+        }
+
+        .text-da { color: var(--accent-da); }
+        .text-gaba { color: var(--accent-gaba); }
+        .text-green { color: var(--accent-green); }
+        .text-gold { color: var(--accent-gold); }
+        .text-purple { color: var(--accent-purple); }
+        .text-bright { color: var(--text-primary); }
+
+        .tag {
+            display: inline-block;
+            padding: 0.15em 0.6em;
+            border-radius: 4px;
+            font-size: var(--small-size);
+            font-weight: 600;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+        }
+        .tag-da { background: rgba(255, 107, 74, 0.15); color: var(--accent-da); border: 1px solid rgba(255,107,74,0.25); }
+        .tag-gaba { background: rgba(74, 173, 255, 0.15); color: var(--accent-gaba); border: 1px solid rgba(74,173,255,0.25); }
+        .tag-method { background: rgba(167, 139, 250, 0.12); color: var(--accent-purple); border: 1px solid rgba(167,139,250,0.2); }
+        .tag-result { background: rgba(61, 220, 132, 0.12); color: var(--accent-green); border: 1px solid rgba(61,220,132,0.2); }
+
+        /* ===========================================
+           LAYOUT COMPONENTS
+           =========================================== */
+        .two-col {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: var(--content-gap);
+            align-items: center;
+        }
+
+        .three-col {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: var(--content-gap);
+        }
+
+        .card {
+            background: var(--bg-card);
+            border: 1px solid rgba(138, 150, 175, 0.1);
+            border-radius: 10px;
+            padding: clamp(0.7rem, 1.5vw, 1.3rem);
+            backdrop-filter: blur(8px);
+        }
+
+        .card-da { border-left: 3px solid var(--accent-da); }
+        .card-gaba { border-left: 3px solid var(--accent-gaba); }
+        .card-green { border-left: 3px solid var(--accent-green); }
+        .card-purple { border-left: 3px solid var(--accent-purple); }
+
+        .metric-box {
+            text-align: center;
+            padding: clamp(0.5rem, 1vw, 1rem);
+        }
+
+        .metric-value {
+            font-family: var(--font-display);
+            font-size: clamp(1.5rem, 3.5vw, 3rem);
+            font-weight: 700;
+            line-height: 1;
+        }
+
+        .metric-label {
+            font-size: var(--small-size);
+            color: var(--text-muted);
+            margin-top: 0.3em;
+        }
+
+        .equation {
+            font-family: var(--font-mono);
+            font-size: clamp(0.65rem, 1.1vw, 0.95rem);
+            background: rgba(167, 139, 250, 0.06);
+            border: 1px solid rgba(167, 139, 250, 0.12);
+            border-radius: 6px;
+            padding: 0.5em 1em;
+            color: var(--accent-purple);
+            display: block;
+            overflow-x: auto;
+            white-space: nowrap;
+        }
+
+        .equation-inline {
+            font-family: var(--font-mono);
+            font-size: var(--mono-size);
+            color: var(--accent-purple);
+            background: rgba(167, 139, 250, 0.06);
+            padding: 0.1em 0.4em;
+            border-radius: 3px;
+        }
+
+        .bullet-list {
+            list-style: none;
+            display: flex;
+            flex-direction: column;
+            gap: var(--element-gap);
+        }
+
+        .bullet-list li {
+            padding-left: 1.2em;
+            position: relative;
+        }
+
+        .bullet-list li::before {
+            content: '';
+            position: absolute;
+            left: 0;
+            top: 0.55em;
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: var(--accent-gaba);
+        }
+
+        .bullet-list.da li::before { background: var(--accent-da); }
+        .bullet-list.green li::before { background: var(--accent-green); }
+
+        .slide-image {
+            max-width: 100%;
+            max-height: min(50vh, 420px);
+            object-fit: contain;
+            border-radius: 8px;
+            border: 1px solid rgba(138, 150, 175, 0.1);
+            box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+        }
+
+        .image-pair {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: clamp(0.4rem, 1vw, 0.8rem);
+            align-items: center;
+        }
+
+        .image-pair img {
+            max-width: 100%;
+            max-height: min(42vh, 360px);
+            object-fit: contain;
+            border-radius: 6px;
+            border: 1px solid rgba(138, 150, 175, 0.08);
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+        }
+
+        .image-caption {
+            font-size: var(--small-size);
+            color: var(--text-muted);
+            text-align: center;
+            margin-top: 0.3em;
+        }
+
+        .divider {
+            width: 60px;
+            height: 3px;
+            border-radius: 2px;
+            background: linear-gradient(90deg, var(--accent-da), var(--accent-gaba));
+        }
+
+        .slide-number {
+            position: absolute;
+            bottom: clamp(0.5rem, 1.5vw, 1rem);
+            right: clamp(0.8rem, 2vw, 1.5rem);
+            font-family: var(--font-mono);
+            font-size: var(--small-size);
+            color: var(--text-muted);
+            opacity: 0.5;
+        }
+
+        .hypothesis-badge {
+            font-family: var(--font-display);
+            font-size: var(--small-size);
+            font-weight: 600;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            padding: 0.25em 0.8em;
+            border-radius: 4px;
+            display: inline-block;
+            margin-bottom: 0.4em;
+        }
+
+        .h1-badge { background: rgba(245, 197, 66, 0.12); color: var(--accent-gold); border: 1px solid rgba(245,197,66,0.2); }
+        .h2-badge { background: rgba(167, 139, 250, 0.12); color: var(--accent-purple); border: 1px solid rgba(167,139,250,0.2); }
+        .h3-badge { background: rgba(61, 220, 132, 0.12); color: var(--accent-green); border: 1px solid rgba(61,220,132,0.2); }
+        .h4-badge { background: rgba(255, 107, 74, 0.12); color: var(--accent-da); border: 1px solid rgba(255,107,74,0.2); }
+
+        .table-container {
+            overflow: hidden;
+            border-radius: 8px;
+            border: 1px solid rgba(138, 150, 175, 0.1);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: var(--small-size);
+        }
+
+        th {
+            background: rgba(74, 173, 255, 0.08);
+            padding: 0.5em 0.8em;
+            text-align: left;
+            font-weight: 600;
+            color: var(--text-primary);
+            border-bottom: 1px solid rgba(138, 150, 175, 0.15);
+        }
+
+        td {
+            padding: 0.4em 0.8em;
+            border-bottom: 1px solid rgba(138, 150, 175, 0.06);
+            color: var(--text-secondary);
+        }
+
+        tr:last-child td { border-bottom: none; }
+
+        /* ===========================================
+           ANIMATIONS
+           =========================================== */
+        .reveal {
+            opacity: 0;
+            transform: translateY(24px);
+            transition: opacity var(--duration-normal) var(--ease-out-expo),
+                        transform var(--duration-normal) var(--ease-out-expo);
+        }
+
+        .slide.visible .reveal {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        .reveal:nth-child(1) { transition-delay: 0.05s; }
+        .reveal:nth-child(2) { transition-delay: 0.15s; }
+        .reveal:nth-child(3) { transition-delay: 0.25s; }
+        .reveal:nth-child(4) { transition-delay: 0.35s; }
+        .reveal:nth-child(5) { transition-delay: 0.45s; }
+        .reveal:nth-child(6) { transition-delay: 0.55s; }
+
+        .reveal-scale {
+            opacity: 0;
+            transform: scale(0.92);
+            transition: opacity 0.8s var(--ease-out-expo), transform 0.8s var(--ease-out-expo);
+        }
+
+        .slide.visible .reveal-scale { opacity: 1; transform: scale(1); }
+
+        /* ===========================================
+           PROGRESS BAR
+           =========================================== */
+        .progress-bar {
+            position: fixed;
+            top: 0;
+            left: 0;
+            height: 3px;
+            background: linear-gradient(90deg, var(--accent-da), var(--accent-gaba));
+            z-index: 1000;
+            transition: width 0.3s ease;
+        }
+
+        /* ===========================================
+           NAV DOTS
+           =========================================== */
+        .nav-dots {
+            position: fixed;
+            right: clamp(0.4rem, 1vw, 0.8rem);
+            top: 50%;
+            transform: translateY(-50%);
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            z-index: 100;
+        }
+
+        .nav-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: rgba(138, 150, 175, 0.2);
+            border: none;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            padding: 0;
+        }
+
+        .nav-dot.active {
+            background: var(--accent-gaba);
+            box-shadow: 0 0 8px var(--accent-glow-gaba);
+            transform: scale(1.3);
+        }
+
+        .nav-dot:hover { background: rgba(138, 150, 175, 0.5); }
+
+        /* ===========================================
+           PCA ANIMATION (CSS)
+           =========================================== */
+        .pca-visual {
+            position: relative;
+            width: min(35vw, 300px);
+            height: min(35vw, 300px);
+            margin: 0 auto;
+        }
+
+        .pca-axis {
+            position: absolute;
+            background: rgba(138, 150, 175, 0.15);
+            border-radius: 1px;
+        }
+
+        .pca-axis-x {
+            width: 80%;
+            height: 2px;
+            top: 50%;
+            left: 10%;
+        }
+
+        .pca-axis-y {
+            width: 2px;
+            height: 80%;
+            left: 50%;
+            top: 10%;
+        }
+
+        .pca-point {
+            position: absolute;
+            width: 5px;
+            height: 5px;
+            border-radius: 50%;
+            animation: pcaFloat 6s ease-in-out infinite;
+        }
+
+        @keyframes pcaFloat {
+            0%, 100% { transform: translate(0, 0); }
+            25% { transform: translate(15px, -10px); }
+            50% { transform: translate(-8px, -18px); }
+            75% { transform: translate(10px, 5px); }
+        }
+
+        .pca-arrow {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            height: 3px;
+            transform-origin: left center;
+            border-radius: 2px;
+        }
+
+        /* ===========================================
+           NEURAL WAVE ANIMATION
+           =========================================== */
+        .neural-wave {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            height: 120px;
+            opacity: 0.06;
+            overflow: hidden;
+            pointer-events: none;
+        }
+
+        .neural-wave svg {
+            width: 200%;
+            height: 100%;
+            animation: waveScroll 20s linear infinite;
+        }
+
+        @keyframes waveScroll {
+            from { transform: translateX(0); }
+            to { transform: translateX(-50%); }
+        }
+
+        /* ===========================================
+           RESPONSIVE
+           =========================================== */
+        @media (max-width: 768px) {
+            .two-col, .three-col { grid-template-columns: 1fr; }
+            .image-pair { grid-template-columns: 1fr; }
+            .image-pair img { max-height: min(30vh, 250px); }
+        }
+
+        @media (max-height: 700px) {
+            :root {
+                --slide-padding: clamp(0.8rem, 2.5vw, 2rem);
+                --content-gap: clamp(0.4rem, 1.2vw, 1rem);
+                --title-size: clamp(1.5rem, 4.5vw, 3rem);
+                --h2-size: clamp(1.1rem, 2.8vw, 1.8rem);
+            }
+        }
+
+        @media (max-height: 600px) {
+            :root {
+                --slide-padding: clamp(0.6rem, 2vw, 1.5rem);
+                --content-gap: clamp(0.3rem, 1vw, 0.7rem);
+                --title-size: clamp(1.2rem, 4vw, 2.2rem);
+                --body-size: clamp(0.65rem, 1.1vw, 0.9rem);
+            }
+            .nav-dots { display: none; }
+        }
+
+        @media (max-height: 500px) {
+            :root {
+                --slide-padding: clamp(0.4rem, 1.5vw, 1rem);
+                --title-size: clamp(1rem, 3.5vw, 1.8rem);
+                --h2-size: clamp(0.9rem, 2.2vw, 1.3rem);
+                --body-size: clamp(0.6rem, 1vw, 0.8rem);
+            }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after {
+                animation-duration: 0.01ms !important;
+                transition-duration: 0.2s !important;
+            }
+            html { scroll-behavior: auto; }
+        }
+    </style>
+</head>
+<body>
+    <!-- Progress bar -->
+    <div class="progress-bar" id="progressBar"></div>
+
+    <!-- Nav dots -->
+    <nav class="nav-dots" id="navDots"></nav>
+
+    <!-- ===================================================
+         SLIDE 1: TITLE
+         =================================================== -->
+    <section class="slide bg-gradient-mixed bg-grid" id="slide-title">
+        <div class="slide-content" style="align-items: center; text-align: center;">
+            <div class="reveal" style="display:flex; gap:0.5em; justify-content:center; flex-wrap:wrap;">
+                <span class="tag tag-da">Dopamine</span>
+                <span class="tag tag-gaba">GABA</span>
+                <span class="tag tag-method">PCA</span>
+            </div>
+            <h1 class="reveal" style="max-width: 900px;">
+                Dimensionality Reduction on<br>
+                <span class="text-da">Dopamine</span> &amp; <span class="text-gaba">GABA</span> Dynamics<br>
+                <span style="font-size:0.55em; font-weight:400; color:var(--text-secondary);">During Stimulus-Reward Learning</span>
+            </h1>
+            <div class="divider reveal" style="margin: 0 auto;"></div>
+            <p class="reveal" style="max-width:640px; text-align:center;">
+                Do VTA dopamine neurons encode <em>reward prediction error</em> &mdash; or <em>movement direction</em>?<br>
+                A population-level PCA framework testing 4 hypotheses across 730 DA and 102 GABA neurons.
+            </p>
+        </div>
+        <div class="neural-wave">
+            <svg viewBox="0 0 2400 120" preserveAspectRatio="none">
+                <path d="M0,60 Q150,10 300,60 T600,60 T900,60 T1200,60 T1500,60 T1800,60 T2100,60 T2400,60" fill="none" stroke="rgba(74,173,255,0.5)" stroke-width="2"/>
+                <path d="M0,60 Q150,110 300,60 T600,60 T900,60 T1200,60 T1500,60 T1800,60 T2100,60 T2400,60" fill="none" stroke="rgba(255,107,74,0.4)" stroke-width="2"/>
+            </svg>
+        </div>
+        <span class="slide-number">1</span>
+    </section>
+
+    <!-- ===================================================
+         SLIDE 2: THE QUESTION
+         =================================================== -->
+    <section class="slide bg-gradient-da bg-grid" id="slide-question">
+        <div class="slide-content">
+            <h2 class="reveal">The Competing Theories</h2>
+            <div class="two-col reveal">
+                <div class="card card-da">
+                    <h3 style="color: var(--accent-da); margin-bottom:0.5em;">Reward Prediction Error</h3>
+                    <p>Schultz (1997): DA neurons fire when reward exceeds expectation. VTA DA = scalar value signal.</p>
+                    <p style="margin-top:0.5em; font-size:var(--small-size); color:var(--text-muted);">Predicts: reward-locked deflections in latent trajectories, DA &ne; motor signals.</p>
+                </div>
+                <div class="card card-gaba">
+                    <h3 style="color: var(--accent-gaba); margin-bottom:0.5em;">Movement Direction Encoding</h3>
+                    <p>DA population activity is dominated by movement kinematics &mdash; forward vs backward direction &mdash; not value.</p>
+                    <p style="margin-top:0.5em; font-size:var(--small-size); color:var(--text-muted);">Predicts: spontaneous movement basis generalises to task; no reward-specific signal.</p>
+                </div>
+            </div>
+            <p class="reveal" style="text-align:center; color:var(--text-muted); font-size:var(--small-size);">
+                We use PCA on trial-averaged z-scored firing rates to test which theory the population geometry supports.
+            </p>
+        </div>
+        <span class="slide-number">2</span>
+    </section>
+
+    <!-- ===================================================
+         SLIDE 3: DATA STRUCTURE
+         =================================================== -->
+    <section class="slide bg-grid" id="slide-data">
+        <div class="slide-content">
+            <h2 class="reveal">Data: Three Behavioral Contexts</h2>
+            <div class="three-col reveal">
+                <div class="card" style="border-top: 3px solid var(--accent-green);">
+                    <h3 class="text-green" style="margin-bottom:0.4em;">SpontFB</h3>
+                    <p style="font-size:var(--small-size);">Spontaneous movement &mdash; no stimulus, no reward</p>
+                    <div class="metric-box">
+                        <div class="metric-value text-green">730</div>
+                        <div class="metric-label">DA neurons</div>
+                    </div>
+                    <div class="metric-box">
+                        <div class="metric-value text-green" style="font-size:clamp(1rem,2.5vw,2rem);">102</div>
+                        <div class="metric-label">GABA neurons</div>
+                    </div>
+                </div>
+                <div class="card" style="border-top: 3px solid var(--accent-da);">
+                    <h3 class="text-da" style="margin-bottom:0.4em;">CRFB</h3>
+                    <p style="font-size:var(--small-size);">Conditioned response &mdash; learned movement onset</p>
+                    <div class="metric-box">
+                        <div class="metric-value text-da" style="font-size:clamp(1rem,2.5vw,2rem);">Shared</div>
+                        <div class="metric-label">same neurons as ToneFB</div>
+                    </div>
+                </div>
+                <div class="card" style="border-top: 3px solid var(--accent-gaba);">
+                    <h3 class="text-gaba" style="margin-bottom:0.4em;">ToneFB</h3>
+                    <p style="font-size:var(--small-size);">Tone (CS) + reward (US) at t<sub>tone</sub> + 100ms</p>
+                    <div class="metric-box">
+                        <div class="metric-value text-gaba" style="font-size:clamp(1rem,2.5vw,2rem);">Same</div>
+                        <div class="metric-label">neurons, different alignment</div>
+                    </div>
+                </div>
+            </div>
+            <div class="reveal">
+                <code class="equation">X &isin; R<sup>n_neurons &times; 2&middot;T</sup> = [ z_forward | z_backward ] &nbsp;&nbsp;&mdash;&nbsp;&nbsp; T = 1201 timesteps, dt = 10ms, event at t = 600</code>
+            </div>
+        </div>
+        <span class="slide-number">3</span>
+    </section>
+
+    <!-- ===================================================
+         SLIDE 4: METHOD - PCA
+         =================================================== -->
+    <section class="slide bg-gradient-mixed bg-grid" id="slide-pca-method">
+        <div class="slide-content">
+            <span class="hypothesis-badge" style="background:rgba(167,139,250,0.12); color:var(--accent-purple); border:1px solid rgba(167,139,250,0.2);">Method</span>
+            <h2 class="reveal">PCA on Neural Populations</h2>
+            <div class="two-col reveal">
+                <div>
+                    <ul class="bullet-list" style="gap: var(--content-gap);">
+                        <li><span class="text-bright">Transpose convention:</span> fit on <span class="equation-inline">X<sup>T</sup></span> &mdash; timepoints are samples, neurons are features</li>
+                        <li><span class="text-bright">Projection:</span> <span class="equation-inline">Z = W(X &minus; &mu;)</span> where <span class="equation-inline">W = V<sub>k</sub><sup>T</sup></span> (top-k eigenvectors) and <span class="equation-inline">&mu;</span> is per-neuron mean</li>
+                        <li><span class="text-bright">Smoothing:</span> Savitzky-Golay filter (window=11, order=3) on each PC trajectory</li>
+                        <li><span class="text-bright">Output:</span> 3D trajectories in PC space for forward &amp; backward movement halves</li>
+                    </ul>
+                </div>
+                <div class="card" style="text-align:center; padding:clamp(1rem,2vw,2rem);">
+                    <!-- SVG PCA diagram -->
+                    <svg viewBox="0 0 260 220" style="max-width:min(30vw,260px); max-height:min(28vh,220px);">
+                        <!-- Axes -->
+                        <line x1="30" y1="190" x2="250" y2="190" stroke="rgba(138,150,175,0.3)" stroke-width="1.5"/>
+                        <line x1="30" y1="190" x2="30" y2="10" stroke="rgba(138,150,175,0.3)" stroke-width="1.5"/>
+                        <text x="245" y="208" fill="#5a6478" font-size="11" font-family="Satoshi">PC1</text>
+                        <text x="8" y="18" fill="#5a6478" font-size="11" font-family="Satoshi">PC2</text>
+                        <!-- Scatter points (data cloud) -->
+                        <g opacity="0.4">
+                            <circle cx="90" cy="140" r="3" fill="#4aadff"/>
+                            <circle cx="110" cy="120" r="3" fill="#4aadff"/>
+                            <circle cx="130" cy="105" r="3" fill="#4aadff"/>
+                            <circle cx="140" cy="95" r="3" fill="#4aadff"/>
+                            <circle cx="155" cy="80" r="3" fill="#4aadff"/>
+                            <circle cx="170" cy="70" r="3" fill="#4aadff"/>
+                            <circle cx="185" cy="55" r="3" fill="#4aadff"/>
+                            <circle cx="100" cy="155" r="3" fill="#4aadff"/>
+                            <circle cx="120" cy="130" r="3" fill="#4aadff"/>
+                            <circle cx="160" cy="88" r="3" fill="#4aadff"/>
+                            <circle cx="200" cy="45" r="3" fill="#4aadff"/>
+                        </g>
+                        <!-- PC1 arrow -->
+                        <line x1="70" y1="165" x2="210" y2="40" stroke="var(--accent-da)" stroke-width="2.5" marker-end="url(#arrowDA)"/>
+                        <text x="200" y="35" fill="var(--accent-da)" font-size="12" font-weight="600" font-family="Clash Display">PC1</text>
+                        <!-- PC2 arrow -->
+                        <line x1="70" y1="165" x2="130" y2="170" stroke="var(--accent-gaba)" stroke-width="2" stroke-dasharray="4 3" marker-end="url(#arrowGABA)"/>
+                        <text x="132" y="182" fill="var(--accent-gaba)" font-size="11" font-weight="500" font-family="Clash Display">PC2</text>
+                        <!-- Mean point -->
+                        <circle cx="140" cy="110" r="5" fill="var(--accent-gold)" stroke="#080b14" stroke-width="1.5"/>
+                        <text x="148" y="108" fill="var(--accent-gold)" font-size="10" font-family="JetBrains Mono">&mu;</text>
+                        <!-- Arrow markers -->
+                        <defs>
+                            <marker id="arrowDA" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+                                <path d="M0,0 L8,3 L0,6" fill="var(--accent-da)"/>
+                            </marker>
+                            <marker id="arrowGABA" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+                                <path d="M0,0 L8,3 L0,6" fill="var(--accent-gaba)"/>
+                            </marker>
+                        </defs>
+                    </svg>
+                    <p style="font-size:var(--small-size); color:var(--text-muted); margin-top:0.3em;">
+                        Variance maximisation in neuron-space.<br>Each timepoint is a sample in R<sup>n</sup>.
+                    </p>
+                </div>
+            </div>
+        </div>
+        <span class="slide-number">4</span>
+    </section>
+
+    <!-- ===================================================
+         SLIDE 5: INITIAL OBSERVATIONS - EVR
+         =================================================== -->
+    <section class="slide bg-grid" id="slide-evr">
+        <div class="slide-content">
+            <span class="tag tag-result">Key Observation</span>
+            <h2 class="reveal">GABA is Low-Dimensional; DA is Heterogeneous</h2>
+            <div class="two-col reveal">
+                <div>
+                    <div class="table-container">
+                        <table>
+                            <thead>
+                                <tr><th>Analysis</th><th>PC1</th><th>PC1-3</th></tr>
+                            </thead>
+                            <tbody>
+                                <tr><td><span class="text-gaba">SpontFB GABA</span></td><td class="text-gaba" style="font-weight:700;">39%</td><td>57%</td></tr>
+                                <tr><td><span class="text-gaba">CRFB GABA</span></td><td class="text-gaba" style="font-weight:700;">27%</td><td>46%</td></tr>
+                                <tr><td><span class="text-gaba">ToneFB GABA</span></td><td class="text-gaba" style="font-weight:700;">32%</td><td>52%</td></tr>
+                                <tr style="border-top:2px solid rgba(138,150,175,0.15);">
+                                    <td><span class="text-da">SpontFB DA</span></td><td class="text-da">7%</td><td>12%</td></tr>
+                                <tr><td><span class="text-da">CRFB DA</span></td><td class="text-da">9%</td><td>17%</td></tr>
+                                <tr><td><span class="text-da">ToneFB DA</span></td><td class="text-da" style="font-weight:700;">21%</td><td>30%</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                <div>
+                    <div class="card card-gaba" style="margin-bottom:var(--element-gap);">
+                        <h3 style="font-size:var(--body-size);">GABA: Coordinated / low-rank</h3>
+                        <p style="font-size:var(--small-size);">PC1 captures 27-39% &mdash; a homogeneous inhibitory population with coordinated dynamics.</p>
+                    </div>
+                    <div class="card card-da" style="margin-bottom:var(--element-gap);">
+                        <h3 style="font-size:var(--body-size);">DA: Heterogeneous / high-dimensional</h3>
+                        <p style="font-size:var(--small-size);">PC1 captures only 7-9% (Spont/CR). Diverse subpopulations (DF, DB, D, DFB) with distinct tuning.</p>
+                    </div>
+                    <div class="card" style="border-left:3px solid var(--accent-gold);">
+                        <h3 style="font-size:var(--body-size);">ToneFB DA anomaly: 21%</h3>
+                        <p style="font-size:var(--small-size);">Tone/CS synchronises DA subpopulations more than spontaneous movement.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <span class="slide-number">5</span>
+    </section>
+
+    <!-- ===================================================
+         SLIDE 6: 3D TRAJECTORIES - SPONTANEOUS
+         =================================================== -->
+    <section class="slide bg-gradient-green bg-grid" id="slide-traj-spont">
+        <div class="slide-content">
+            <h2 class="reveal">SpontFB: Spontaneous Movement Trajectories</h2>
+            <div class="image-pair reveal-scale">
+                <div style="text-align:center;">
+                    <img src="presentation-assets/SpontFB_Dopamine_trajectory.png" alt="SpontFB DA trajectory">
+                    <p class="image-caption"><span class="text-da">Dopamine</span> &mdash; 730 neurons, EVR = 12%</p>
+                </div>
+                <div style="text-align:center;">
+                    <img src="presentation-assets/SpontFB_GABA_trajectory.png" alt="SpontFB GABA trajectory">
+                    <p class="image-caption"><span class="text-gaba">GABA</span> &mdash; 102 neurons, EVR = 57%</p>
+                </div>
+            </div>
+            <p class="reveal" style="text-align:center; font-size:var(--small-size); color:var(--text-muted);">
+                Red = forward trajectory, Blue = backward. GABA shows clear directional separation; DA is more entangled.
+            </p>
+        </div>
+        <span class="slide-number">6</span>
+    </section>
+
+    <!-- ===================================================
+         SLIDE 7: 3D TRAJECTORIES - TASK
+         =================================================== -->
+    <section class="slide bg-gradient-mixed bg-grid" id="slide-traj-task">
+        <div class="slide-content">
+            <h2 class="reveal">Task Contexts: ToneFB vs CRFB</h2>
+            <div class="image-pair reveal-scale">
+                <div style="text-align:center;">
+                    <img src="presentation-assets/ToneFB_Dopamine_trajectory.png" alt="ToneFB DA trajectory">
+                    <p class="image-caption"><span class="text-da">ToneFB DA</span> &mdash; large loops, poor direction separation</p>
+                </div>
+                <div style="text-align:center;">
+                    <img src="presentation-assets/ToneFB_GABA_trajectory.png" alt="ToneFB GABA trajectory">
+                    <p class="image-caption"><span class="text-gaba">ToneFB GABA</span> &mdash; distinct fwd/bwd regions</p>
+                </div>
+            </div>
+            <p class="reveal" style="text-align:center; font-size:var(--small-size); color:var(--text-muted);">
+                DA ToneFB shows large CS-driven excursions (arc length ~1095) but fwd-bwd separation only 7.8. GABA separation: 19-28 across datasets.
+            </p>
+        </div>
+        <span class="slide-number">7</span>
+    </section>
+
+    <!-- ===================================================
+         SLIDE 8: H1 TITLE
+         =================================================== -->
+    <section class="slide bg-gradient-da bg-grid" id="slide-h1">
+        <div class="slide-content" style="align-items:center; text-align:center;">
+            <span class="hypothesis-badge h1-badge reveal">Hypothesis 1</span>
+            <h1 class="reveal" style="font-size:clamp(1.5rem,4vw,3.2rem); max-width:800px;">
+                Movement Direction<br>Dominates Latent Structure
+            </h1>
+            <div class="divider reveal" style="margin:0 auto;"></div>
+            <p class="reveal" style="max-width:600px; text-align:center;">
+                If movement direction is the primary organiser, a PCA basis learned from <span class="text-green">spontaneous</span> movement should generalise to <span class="text-da">task</span> contexts &mdash; even across different neuron populations.
+            </p>
+        </div>
+        <span class="slide-number">8</span>
+    </section>
+
+    <!-- ===================================================
+         SLIDE 9: H1 - CROSS-PROJECTION METHOD
+         =================================================== -->
+    <section class="slide bg-grid" id="slide-h1-method">
+        <div class="slide-content">
+            <span class="hypothesis-badge h1-badge">H1</span>
+            <h2 class="reveal">Cross-Projection: Testing Basis Generalisation</h2>
+            <div class="two-col reveal">
+                <div>
+                    <div class="card card-green" style="margin-bottom:var(--element-gap);">
+                        <h3 style="font-size:var(--body-size); margin-bottom:0.3em;">Same-Neuron (CRFB &harr; ToneFB)</h3>
+                        <p style="font-size:var(--small-size);">Identical neurons, different event alignment. Fit PCA on dataset A, project dataset B &mdash; measure R&sup2;.</p>
+                    </div>
+                    <div class="card card-purple" style="margin-bottom:var(--element-gap);">
+                        <h3 style="font-size:var(--body-size); margin-bottom:0.3em;">Group-Averaged (SpontFB &harr; Task)</h3>
+                        <p style="font-size:var(--small-size);">Different individual neurons. Average within neuron groups (DF, DB, D, DFB) to create 4 pseudo-neurons. Cross-project between datasets.</p>
+                    </div>
+                </div>
+                <div>
+                    <code class="equation" style="margin-bottom:var(--element-gap); display:block;">
+                        R&sup2; = 1 &minus; SS<sub>res</sub> / SS<sub>tot</sub>
+                    </code>
+                    <code class="equation" style="margin-bottom:var(--element-gap); display:block;">
+                        SS<sub>tot</sub> = &Sigma;<sub>i</sub> || x<sub>i</sub> &minus; &mu;<sub>i</sub> ||&sup2;
+                    </code>
+                    <code class="equation" style="display:block;">
+                        SS<sub>res</sub> = &Sigma;<sub>i</sub> || x<sub>i</sub> &minus; W<sup>T</sup>Wx<sub>i</sub> ||&sup2;
+                    </code>
+                    <p style="font-size:var(--small-size); color:var(--text-muted); margin-top:0.5em;">
+                        Per-neuron mean &mu;<sub>i</sub> from the <em>training</em> PCA is subtracted from the <em>test</em> data before projection. This corrected formulation matches what PCA actually optimises.
+                    </p>
+                </div>
+            </div>
+        </div>
+        <span class="slide-number">9</span>
+    </section>
+
+    <!-- ===================================================
+         SLIDE 10: H1 - RESULTS
+         =================================================== -->
+    <section class="slide bg-gradient-da bg-grid" id="slide-h1-results">
+        <div class="slide-content">
+            <span class="hypothesis-badge h1-badge">H1</span>
+            <h2 class="reveal">Cross-Projection R&sup2;: Movement Basis Generalises</h2>
+            <div class="reveal" style="display:grid; grid-template-columns: 1fr 1fr; gap:var(--content-gap);">
+                <div class="card" style="border-top:3px solid var(--accent-gold);">
+                    <h3 style="font-size:var(--body-size); color:var(--accent-gold); margin-bottom:0.6em;">Group-Averaged: SpontFB &rarr; Task</h3>
+                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.5rem;">
+                        <div class="metric-box">
+                            <div class="metric-value text-gold" style="font-size:clamp(1.3rem,3vw,2.5rem);">0.92</div>
+                            <div class="metric-label">DA: Spont&rarr;Tone</div>
+                        </div>
+                        <div class="metric-box">
+                            <div class="metric-value text-gold" style="font-size:clamp(1.3rem,3vw,2.5rem);">0.94</div>
+                            <div class="metric-label">DA: Spont&rarr;CR</div>
+                        </div>
+                        <div class="metric-box">
+                            <div class="metric-value text-gold" style="font-size:clamp(1.3rem,3vw,2.5rem);">0.93</div>
+                            <div class="metric-label">GABA: Spont&rarr;Tone</div>
+                        </div>
+                        <div class="metric-box">
+                            <div class="metric-value text-gold" style="font-size:clamp(1.3rem,3vw,2.5rem);">0.93</div>
+                            <div class="metric-label">GABA: Spont&rarr;CR</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="card" style="border-top:3px solid var(--accent-gaba);">
+                    <h3 style="font-size:var(--body-size); color:var(--accent-gaba); margin-bottom:0.6em;">Same-Neuron: CRFB &harr; ToneFB</h3>
+                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.5rem;">
+                        <div class="metric-box">
+                            <div class="metric-value text-gaba" style="font-size:clamp(1.3rem,3vw,2.5rem);">0.43</div>
+                            <div class="metric-label">GABA R&sup2;</div>
+                        </div>
+                        <div class="metric-box">
+                            <div class="metric-value text-gaba" style="font-size:clamp(1rem,2vw,1.5rem);">&asymp; 1.0</div>
+                            <div class="metric-label">GABA subspace overlap</div>
+                        </div>
+                        <div class="metric-box">
+                            <div class="metric-value text-da" style="font-size:clamp(1.3rem,3vw,2.5rem);">0.13</div>
+                            <div class="metric-label">DA R&sup2;</div>
+                        </div>
+                        <div class="metric-box">
+                            <div class="metric-value text-da" style="font-size:clamp(1rem,2vw,1.5rem);">partial</div>
+                            <div class="metric-label">DA subspace overlap</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <p class="reveal" style="font-size:var(--small-size); color:var(--text-secondary); text-align:center;">
+                <strong class="text-bright">87-94% of task variance</strong> is captured by the spontaneous movement basis. DA shows ~10% additional task-specific variance vs GABA.
+            </p>
+        </div>
+        <span class="slide-number">10</span>
+    </section>
+
+    <!-- ===================================================
+         SLIDE 11: H1 - NULL MODELS
+         =================================================== -->
+    <section class="slide bg-grid" id="slide-h1-null">
+        <div class="slide-content">
+            <span class="hypothesis-badge h1-badge">H1</span>
+            <h2 class="reveal">Null Models Confirm Significance</h2>
+            <div class="two-col reveal">
+                <div>
+                    <div class="card card-purple" style="margin-bottom:var(--element-gap);">
+                        <h3 style="font-size:var(--body-size); margin-bottom:0.3em;">Phase Randomisation</h3>
+                        <p style="font-size:var(--small-size);">FFT each group's time-course &rarr; randomise phases &rarr; IFFT. Preserves autocorrelation &amp; power spectrum; destroys inter-group temporal alignment.</p>
+                        <code class="equation" style="margin-top:0.4em; font-size:var(--mono-size);">
+                            X&#770;(f) = |X(f)| &middot; e<sup>i&phi;<sub>rand</sub></sup>
+                        </code>
+                    </div>
+                    <div class="card card-purple">
+                        <h3 style="font-size:var(--body-size); margin-bottom:0.3em;">Circular Time-Shift</h3>
+                        <p style="font-size:var(--small-size);">Independently shift each neuron's fwd/bwd halves by a random offset. Preserves per-neuron autocorrelation; destroys across-neuron alignment.</p>
+                    </div>
+                </div>
+                <div>
+                    <div class="card" style="text-align:center; border: 1px solid rgba(61,220,132,0.2);">
+                        <h3 style="font-size:var(--body-size); color:var(--accent-green); margin-bottom:0.5em;">Result: All p &lt; 0.01</h3>
+                        <p style="font-size:var(--small-size);">Observed R&sup2; values significantly exceed null distributions (n=500 permutations).</p>
+                        <code class="equation" style="margin-top:0.5em; font-size:var(--mono-size);">
+                            p = (#{null &ge; obs} + 1) / (n<sub>perm</sub> + 1)
+                        </code>
+                        <p style="font-size:var(--small-size); margin-top:0.5em; color:var(--text-muted);">+1 correction prevents p=0 and ensures conservative testing.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <span class="slide-number">11</span>
+    </section>
+
+    <!-- ===================================================
+         SLIDE 12: H2 TITLE
+         =================================================== -->
+    <section class="slide bg-gradient-gaba bg-grid" id="slide-h2">
+        <div class="slide-content" style="align-items:center; text-align:center;">
+            <span class="hypothesis-badge h2-badge reveal">Hypothesis 2</span>
+            <h1 class="reveal" style="font-size:clamp(1.5rem,4vw,3.2rem); max-width:800px;">
+                <span class="text-da">DA</span> and <span class="text-gaba">GABA</span><br>
+                Encode Different Latent Variables
+            </h1>
+            <div class="divider reveal" style="margin:0 auto;"></div>
+            <p class="reveal" style="max-width:600px; text-align:center;">
+                GABA should be low-dimensional and direction-selective.<br>
+                DA should be heterogeneous and task-modulated.
+            </p>
+        </div>
+        <span class="slide-number">12</span>
+    </section>
+
+    <!-- ===================================================
+         SLIDE 13: H2 - TRAJECTORY METRICS
+         =================================================== -->
+    <section class="slide bg-grid" id="slide-h2-metrics">
+        <div class="slide-content">
+            <span class="hypothesis-badge h2-badge">H2</span>
+            <h2 class="reveal">Trajectory Metrics: Direction Separation</h2>
+            <div class="reveal">
+                <div class="table-container">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Analysis</th>
+                                <th>Mean Sep.</th>
+                                <th>Peak Sep.</th>
+                                <th>Post-event Sep.</th>
+                                <th>Arc Length (fwd)</th>
+                                <th>PR</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td><span class="text-gaba">SpontFB GABA</span></td>
+                                <td class="text-gaba" style="font-weight:700;">28.4</td>
+                                <td>42.1</td>
+                                <td>31.2</td>
+                                <td>385</td>
+                                <td>3.8</td>
+                            </tr>
+                            <tr>
+                                <td><span class="text-gaba">ToneFB GABA</span></td>
+                                <td class="text-gaba" style="font-weight:700;">19.3</td>
+                                <td>30.5</td>
+                                <td>22.7</td>
+                                <td>448</td>
+                                <td>4.2</td>
+                            </tr>
+                            <tr>
+                                <td><span class="text-da">SpontFB DA</span></td>
+                                <td class="text-da">12.2</td>
+                                <td>18.8</td>
+                                <td>14.5</td>
+                                <td>520</td>
+                                <td>22.6</td>
+                            </tr>
+                            <tr>
+                                <td><span class="text-da">ToneFB DA</span></td>
+                                <td class="text-da">7.8</td>
+                                <td>14.2</td>
+                                <td>9.1</td>
+                                <td style="font-weight:700;">1095</td>
+                                <td>8.4</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="two-col reveal" style="margin-top:var(--element-gap);">
+                <div class="card card-gaba">
+                    <p style="font-size:var(--small-size);"><strong class="text-gaba">GABA:</strong> High separation (19-28) &mdash; fwd &amp; bwd trajectories occupy different regions. Strong direction encoding.</p>
+                </div>
+                <div class="card card-da">
+                    <p style="font-size:var(--small-size);"><strong class="text-da">DA ToneFB:</strong> Largest arc length (1095) but lowest separation (7.8). Large excursions driven by CS, not by direction.</p>
+                </div>
+            </div>
+            <p class="reveal" style="font-size:var(--small-size); color:var(--text-muted); text-align:center;">
+                Participation ratio (PR): GABA &asymp; 3-4 effective dimensions; DA SpontFB &asymp; 23. Null model confirms separation p &lt; 0.01.
+            </p>
+        </div>
+        <span class="slide-number">13</span>
+    </section>
+
+    <!-- ===================================================
+         SLIDE 14: H2 - RSA + PROCRUSTES
+         =================================================== -->
+    <section class="slide bg-gradient-gaba bg-grid" id="slide-h2-rsa">
+        <div class="slide-content">
+            <span class="hypothesis-badge h2-badge">H2</span>
+            <h2 class="reveal">RSA &amp; Procrustes: Manifold Comparison</h2>
+            <div class="two-col reveal">
+                <div>
+                    <div class="card card-purple" style="margin-bottom:var(--content-gap);">
+                        <h3 style="font-size:var(--body-size); margin-bottom:0.4em;">Representational Similarity Analysis</h3>
+                        <p style="font-size:var(--small-size);">Compute RDM (Representational Dissimilarity Matrix) for each population &mdash; pairwise temporal distances.</p>
+                        <code class="equation" style="margin-top:0.4em; font-size:var(--mono-size);">
+                            RDM<sub>ij</sub> = 1 &minus; corr(x<sub>t=i</sub>, x<sub>t=j</sub>)
+                        </code>
+                        <p style="font-size:var(--small-size); margin-top:0.4em;">Basis-free: captures representational geometry independent of rotation.</p>
+                    </div>
+                    <div class="card card-purple">
+                        <h3 style="font-size:var(--body-size); margin-bottom:0.4em;">Procrustes Analysis</h3>
+                        <p style="font-size:var(--small-size);">Optimal rotation + uniform scaling to minimise shape distance.</p>
+                        <code class="equation" style="margin-top:0.4em; font-size:var(--mono-size);">
+                            d<sub>proc</sub> = min<sub>R,s</sub> ||X &minus; sYR||<sub>F</sub>&sup2;
+                        </code>
+                        <p style="font-size:var(--small-size); margin-top:0.4em;">Low disparity = similar trajectory geometry after removing rotation &amp; scale.</p>
+                    </div>
+                </div>
+                <div>
+                    <div class="card" style="border:1px solid rgba(61,220,132,0.2); text-align:center;">
+                        <h3 style="font-size:var(--body-size); color:var(--accent-green); margin-bottom:0.5em;">Key Finding</h3>
+                        <p style="font-size:var(--small-size);">DA and GABA RDMs are <strong class="text-bright">statistically different</strong> (one-sample t-test across epochs, p &lt; 0.05).</p>
+                        <p style="font-size:var(--small-size); margin-top:0.5em;">GABA encodes a <em>direction-dominated</em> temporal geometry. DA encodes a <em>CS/value-modulated</em> geometry.</p>
+                        <p style="font-size:var(--small-size); margin-top:0.5em; color:var(--text-muted);">Validated via bootstrap pattern evaluation (n=1000).</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <span class="slide-number">14</span>
+    </section>
+
+    <!-- ===================================================
+         SLIDE 15: H3 TITLE
+         =================================================== -->
+    <section class="slide bg-gradient-green bg-grid" id="slide-h3">
+        <div class="slide-content" style="align-items:center; text-align:center;">
+            <span class="hypothesis-badge h3-badge reveal">Hypothesis 3</span>
+            <h1 class="reveal" style="font-size:clamp(1.5rem,4vw,3.2rem); max-width:800px;">
+                No Reward-Specific<br>Signal in Trajectories
+            </h1>
+            <div class="divider reveal" style="margin:0 auto;"></div>
+            <p class="reveal" style="max-width:600px; text-align:center;">
+                If DA encodes value, trajectories should deflect at reward delivery (t = +100ms post-tone in ToneFB). If DA encodes movement, no such deflection should exist.
+            </p>
+        </div>
+        <span class="slide-number">15</span>
+    </section>
+
+    <!-- ===================================================
+         SLIDE 16: H3 - METHODS
+         =================================================== -->
+    <section class="slide bg-grid" id="slide-h3-methods">
+        <div class="slide-content">
+            <span class="hypothesis-badge h3-badge">H3</span>
+            <h2 class="reveal">Testing for Reward Deflection</h2>
+            <div class="three-col reveal">
+                <div class="card card-green">
+                    <h3 style="font-size:var(--body-size); margin-bottom:0.4em;">Speed Profiles</h3>
+                    <p style="font-size:var(--small-size);">Trajectory velocity over time: <span class="equation-inline">v(t) = ||dZ/dt||</span>. A reward signal would appear as a speed transient at t = +100ms in ToneFB but not SpontFB.</p>
+                </div>
+                <div class="card card-green">
+                    <h3 style="font-size:var(--body-size); margin-bottom:0.4em;">Cross-Epoch R&sup2;</h3>
+                    <p style="font-size:var(--small-size);">Fit PCA on one epoch, project all others. If pre-tone &amp; post-reward share high R&sup2;, the same latent structure persists across task phases.</p>
+                </div>
+                <div class="card card-green">
+                    <h3 style="font-size:var(--body-size); margin-bottom:0.4em;">Null Model</h3>
+                    <p style="font-size:var(--small-size);">Within-dataset: circular time-shift, recompute speed at reward index. Between-dataset: bootstrap resample ToneFB vs SpontFB post-event speeds.</p>
+                </div>
+            </div>
+            <div class="reveal" style="text-align:center; margin-top:var(--element-gap);">
+                <code class="equation" style="display:inline-block;">
+                    Epochs: pre_tone [450,600) &nbsp;|&nbsp; cs_period [600,700) &nbsp;|&nbsp; post_reward [700,850)
+                </code>
+                <p style="font-size:var(--small-size); color:var(--text-muted); margin-top:0.3em;">
+                    Non-overlapping epochs (corrected from original [600,750) overlap bug).
+                </p>
+            </div>
+        </div>
+        <span class="slide-number">16</span>
+    </section>
+
+    <!-- ===================================================
+         SLIDE 17: H3 - EPOCH TRAJECTORIES
+         =================================================== -->
+    <section class="slide bg-gradient-green bg-grid" id="slide-h3-epochs">
+        <div class="slide-content">
+            <span class="hypothesis-badge h3-badge">H3</span>
+            <h2 class="reveal">CS-Period Trajectories: DA vs GABA</h2>
+            <div class="image-pair reveal-scale">
+                <div style="text-align:center;">
+                    <img src="presentation-assets/ToneFB_DA_cs_period.png" alt="ToneFB DA CS period">
+                    <p class="image-caption"><span class="text-da">DA</span> &mdash; CS period [600, 700)</p>
+                </div>
+                <div style="text-align:center;">
+                    <img src="presentation-assets/ToneFB_GABA_cs_period.png" alt="ToneFB GABA CS period">
+                    <p class="image-caption"><span class="text-gaba">GABA</span> &mdash; CS period [600, 700)</p>
+                </div>
+            </div>
+            <p class="reveal" style="text-align:center; font-size:var(--small-size); color:var(--text-secondary);">
+                Divergence onset is consistent across datasets &mdash; near movement onset, not reward delivery. Cross-epoch R&sup2; shows the same latent structure persists across task phases.
+            </p>
+        </div>
+        <span class="slide-number">17</span>
+    </section>
+
+    <!-- ===================================================
+         SLIDE 18: H4 TITLE
+         =================================================== -->
+    <section class="slide bg-gradient-da bg-grid" id="slide-h4">
+        <div class="slide-content" style="align-items:center; text-align:center;">
+            <span class="hypothesis-badge h4-badge reveal">Hypothesis 4</span>
+            <h1 class="reveal" style="font-size:clamp(1.3rem,3.5vw,2.8rem); max-width:800px;">
+                CS-Evoked &amp; CR-Evoked DA:<br>
+                Same Signal, Time-Shifted
+            </h1>
+            <div class="divider reveal" style="margin:0 auto;"></div>
+            <p class="reveal" style="max-width:620px; text-align:center;">
+                If ToneFB (tone-aligned) and CRFB (movement-aligned) phasic DA bursts are the same movement-related signal, cross-correlation should peak at a lag consistent with reaction time (~100-400ms).
+            </p>
+        </div>
+        <span class="slide-number">18</span>
+    </section>
+
+    <!-- ===================================================
+         SLIDE 19: H4 - CROSS-CORRELATION + RESULTS
+         =================================================== -->
+    <section class="slide bg-grid" id="slide-h4-results">
+        <div class="slide-content">
+            <span class="hypothesis-badge h4-badge">H4</span>
+            <h2 class="reveal">Cross-Correlation &amp; Subspace Analysis</h2>
+            <div class="two-col reveal">
+                <div>
+                    <div class="card card-da" style="margin-bottom:var(--element-gap);">
+                        <h3 style="font-size:var(--body-size); margin-bottom:0.3em;">Cross-Correlation</h3>
+                        <p style="font-size:var(--small-size);">Peak lag at ~reaction time (0.1-0.4s). Symmetric peaks in both lag directions confirm the same event appears at different phases of each alignment window.</p>
+                        <code class="equation" style="margin-top:0.4em; font-size:var(--mono-size);">
+                            C(&tau;) = &Sigma;<sub>t</sub> Z<sub>Tone</sub>(t) &middot; Z<sub>CR</sub>(t + &tau;)
+                        </code>
+                    </div>
+                    <div class="card card-gaba">
+                        <h3 style="font-size:var(--body-size); margin-bottom:0.3em;">GABA Subspace Overlap</h3>
+                        <p style="font-size:var(--small-size);">Principal angles: [0.985, 0.982, 0.927] &mdash; nearly 0&deg;. ToneFB and CRFB GABA span the <em>same</em> 3D subspace.</p>
+                    </div>
+                </div>
+                <div>
+                    <div class="card" style="border:1px solid rgba(245,197,66,0.2);">
+                        <h3 style="font-size:var(--body-size); color:var(--accent-gold); margin-bottom:0.5em;">Interpretation</h3>
+                        <ul class="bullet-list da" style="font-size:var(--small-size);">
+                            <li>GABA R&sup2; ~0.40-0.45: same subspace axes, different temporal dynamics</li>
+                            <li>DA R&sup2; ~0.08-0.18: more timing-sensitive; CS and CR activate different temporal patterns</li>
+                            <li>Low Procrustes disparity: similar trajectory <em>shape</em> after rotation/scale removal</li>
+                            <li><strong class="text-bright">Conclusion:</strong> CS and CR engage the same population modes at different temporal phases &mdash; inconsistent with "CS = value, CR = motor"</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <span class="slide-number">19</span>
+    </section>
+
+    <!-- ===================================================
+         SLIDE 20: H4 - CRFB TRAJECTORIES
+         =================================================== -->
+    <section class="slide bg-gradient-da bg-grid" id="slide-h4-traj">
+        <div class="slide-content">
+            <span class="hypothesis-badge h4-badge">H4</span>
+            <h2 class="reveal">CRFB Trajectories: DA vs GABA</h2>
+            <div class="image-pair reveal-scale">
+                <div style="text-align:center;">
+                    <img src="presentation-assets/CRFB_Dopamine_trajectory.png" alt="CRFB DA trajectory">
+                    <p class="image-caption"><span class="text-da">CRFB DA</span> &mdash; movement-aligned, partial overlap with ToneFB</p>
+                </div>
+                <div style="text-align:center;">
+                    <img src="presentation-assets/CRFB_GABA_trajectory.png" alt="CRFB GABA trajectory">
+                    <p class="image-caption"><span class="text-gaba">CRFB GABA</span> &mdash; clear fwd/bwd separation preserved</p>
+                </div>
+            </div>
+        </div>
+        <span class="slide-number">20</span>
+    </section>
+
+    <!-- ===================================================
+         SLIDE 21: METHODOLOGICAL RIGOUR
+         =================================================== -->
+    <section class="slide bg-grid" id="slide-rigour">
+        <div class="slide-content">
+            <span class="tag tag-method">Rigour</span>
+            <h2 class="reveal">Audit Corrections &amp; Best Practices</h2>
+            <div class="two-col reveal">
+                <div>
+                    <div class="table-container">
+                        <table>
+                            <thead><tr><th>Issue</th><th>Fix</th></tr></thead>
+                            <tbody>
+                                <tr>
+                                    <td style="font-size:var(--small-size);">Missing mean subtraction in cross-projection</td>
+                                    <td style="font-size:var(--small-size);">Now uses <span class="equation-inline">pca.mean_</span> from training set</td>
+                                </tr>
+                                <tr>
+                                    <td style="font-size:var(--small-size);">Epoch overlap: [600,750) &cap; [700,850)</td>
+                                    <td style="font-size:var(--small-size);">cs_period [600,700), post_reward [700,850)</td>
+                                </tr>
+                                <tr>
+                                    <td style="font-size:var(--small-size);">R&sup2; used global mean</td>
+                                    <td style="font-size:var(--small-size);">Per-neuron mean (matches PCA objective)</td>
+                                </tr>
+                                <tr>
+                                    <td style="font-size:var(--small-size);">PC alignment by index</td>
+                                    <td style="font-size:var(--small-size);">Hungarian algorithm on cross-Gram matrix</td>
+                                </tr>
+                                <tr>
+                                    <td style="font-size:var(--small-size);">No cross-validation for cross-class R&sup2;</td>
+                                    <td style="font-size:var(--small-size);">5-fold CV (contiguous time blocks)</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                <div>
+                    <div class="card card-purple">
+                        <h3 style="font-size:var(--body-size); margin-bottom:0.4em;">Hungarian Algorithm for PC Alignment</h3>
+                        <p style="font-size:var(--small-size);">When comparing PCA from datasets A &amp; B, PC1<sub>A</sub> may correspond to PC2<sub>B</sub>. The Hungarian algorithm finds the optimal permutation via the cross-Gram matrix:</p>
+                        <code class="equation" style="margin-top:0.4em; font-size:var(--mono-size);">
+                            G<sub>ij</sub> = |v<sub>i</sub><sup>A</sup> &middot; v<sub>j</sub><sup>B</sup>|
+                        </code>
+                        <p style="font-size:var(--small-size); margin-top:0.3em; color:var(--text-muted);">Maximises total alignment cost in O(k&sup3;) &mdash; superior to na&iuml;ve index matching.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <span class="slide-number">21</span>
+    </section>
+
+    <!-- ===================================================
+         SLIDE 22: SUMMARY TABLE
+         =================================================== -->
+    <section class="slide bg-gradient-mixed bg-grid" id="slide-summary">
+        <div class="slide-content">
+            <h2 class="reveal">Summary of Evidence</h2>
+            <div class="reveal">
+                <div class="table-container">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th style="width:8%;">H</th>
+                                <th style="width:26%;">Claim</th>
+                                <th style="width:30%;">Key Evidence</th>
+                                <th style="width:20%;">Metric</th>
+                                <th style="width:16%;">Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td><span class="text-gold" style="font-weight:700;">H1</span></td>
+                                <td>Movement direction dominates latent structure</td>
+                                <td>SpontFB basis generalises to task</td>
+                                <td><span class="text-gold" style="font-weight:700;">R&sup2; = 0.87-0.94</span></td>
+                                <td><span class="tag tag-result" style="font-size:0.7em;">Supported</span></td>
+                            </tr>
+                            <tr>
+                                <td><span class="text-purple" style="font-weight:700;">H2</span></td>
+                                <td>DA &ne; GABA latent variables</td>
+                                <td>GABA: low-dim, direction-selective; DA: heterogeneous</td>
+                                <td><span class="text-purple">PR: 3-4 vs 23</span></td>
+                                <td><span class="tag tag-result" style="font-size:0.7em;">Supported</span></td>
+                            </tr>
+                            <tr>
+                                <td><span class="text-green" style="font-weight:700;">H3</span></td>
+                                <td>No reward-specific deflection</td>
+                                <td>Divergence onset at movement, not reward; cross-epoch R&sup2; high</td>
+                                <td><span class="text-green">See null models</span></td>
+                                <td><span class="tag" style="font-size:0.7em; background:rgba(245,197,66,0.12); color:var(--accent-gold); border:1px solid rgba(245,197,66,0.2);">Pending</span></td>
+                            </tr>
+                            <tr>
+                                <td><span class="text-da" style="font-weight:700;">H4</span></td>
+                                <td>CS &amp; CR = same signal, time-shifted</td>
+                                <td>Cross-corr peak at RT; subspace overlap &asymp; 1.0</td>
+                                <td><span class="text-da">lag ~ 0.1-0.4s</span></td>
+                                <td><span class="tag tag-result" style="font-size:0.7em;">Supported</span></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="reveal" style="display:flex; gap:var(--element-gap); flex-wrap:wrap; justify-content:center; margin-top:var(--element-gap);">
+                <div class="card card-da" style="flex:1; min-width:200px; max-width:350px; text-align:center;">
+                    <p style="font-size:var(--small-size);">DA encodes movement with ~10% additional task/value variance</p>
+                </div>
+                <div class="card card-gaba" style="flex:1; min-width:200px; max-width:350px; text-align:center;">
+                    <p style="font-size:var(--small-size);">GABA is a low-rank directional signal, consistent across all contexts</p>
+                </div>
+            </div>
+        </div>
+        <span class="slide-number">22</span>
+    </section>
+
+    <!-- ===================================================
+         SLIDE 23: FUTURE DIRECTIONS
+         =================================================== -->
+    <section class="slide bg-gradient-mixed bg-grid" id="slide-future">
+        <div class="slide-content" style="align-items:center; text-align:center;">
+            <h2 class="reveal">Future Directions</h2>
+            <div class="reveal" style="display:flex; flex-direction:column; gap:var(--element-gap); max-width:700px; text-align:left;">
+                <div class="card" style="border-left:3px solid var(--accent-gold);">
+                    <h3 style="font-size:var(--body-size);">H5: Aversive Stimuli (Airpuff)</h3>
+                    <p style="font-size:var(--small-size);">Project airpuff data onto ToneFB PCA space. If R&sup2; drops: value axis exists. If R&sup2; holds: same movement subspace.</p>
+                </div>
+                <div class="card" style="border-left:3px solid var(--accent-purple);">
+                    <h3 style="font-size:var(--body-size);">Behavioral Correlation</h3>
+                    <p style="font-size:var(--small-size);">Align per-trial force/lick traces to z-scored firing rates. Quantitatively link PC timecourses to kinematics.</p>
+                </div>
+                <div class="card" style="border-left:3px solid var(--accent-green);">
+                    <h3 style="font-size:var(--body-size);">Single-Trial PCA</h3>
+                    <p style="font-size:var(--small-size);">Move beyond trial-averaged data. Cross-validate across individual trials to strengthen encoding claims.</p>
+                </div>
+            </div>
+        </div>
+        <span class="slide-number">23</span>
+    </section>
+
+    <!-- ===================================================
+         SLIDE 24: CLOSING
+         =================================================== -->
+    <section class="slide bg-gradient-mixed bg-grid" id="slide-end">
+        <div class="slide-content" style="align-items:center; text-align:center;">
+            <h1 class="reveal" style="font-size:clamp(1.5rem,4vw,3rem);">
+                VTA Dopamine Encodes<br>
+                <span class="text-da">Movement</span>, Not <span style="text-decoration:line-through; opacity:0.4;">Reward</span>
+            </h1>
+            <div class="divider reveal" style="margin:0 auto;"></div>
+            <p class="reveal" style="color:var(--text-secondary); max-width:500px;">
+                Population geometry analysis across 832 VTA neurons and 3 behavioral contexts supports the kinematic hypothesis over RPE theory.
+            </p>
+            <div class="reveal" style="display:flex; gap:1em; flex-wrap:wrap; justify-content:center; margin-top:0.5em;">
+                <span class="tag tag-da">730 DA</span>
+                <span class="tag tag-gaba">102 GABA</span>
+                <span class="tag tag-method">5 Null Models</span>
+                <span class="tag tag-result">3/4 Hypotheses Supported</span>
+            </div>
+        </div>
+        <div class="neural-wave">
+            <svg viewBox="0 0 2400 120" preserveAspectRatio="none">
+                <path d="M0,60 Q150,10 300,60 T600,60 T900,60 T1200,60 T1500,60 T1800,60 T2100,60 T2400,60" fill="none" stroke="rgba(74,173,255,0.5)" stroke-width="2"/>
+                <path d="M0,60 Q150,110 300,60 T600,60 T900,60 T1200,60 T1500,60 T1800,60 T2100,60 T2400,60" fill="none" stroke="rgba(255,107,74,0.4)" stroke-width="2"/>
+            </svg>
+        </div>
+        <span class="slide-number">24</span>
+    </section>
+
+    <!-- ===========================================
+         JAVASCRIPT: PRESENTATION CONTROLLER
+         =========================================== -->
+    <script>
+        class SlidePresentation {
+            constructor() {
+                this.slides = document.querySelectorAll('.slide');
+                this.currentSlide = 0;
+                this.totalSlides = this.slides.length;
+                this.isScrolling = false;
+                this.scrollTimeout = null;
+
+                this.init();
+            }
+
+            init() {
+                this.createNavDots();
+                this.setupIntersectionObserver();
+                this.setupKeyboardNav();
+                this.setupTouchNav();
+                this.updateProgress();
+            }
+
+            createNavDots() {
+                const nav = document.getElementById('navDots');
+                this.slides.forEach((_, i) => {
+                    const dot = document.createElement('button');
+                    dot.className = 'nav-dot' + (i === 0 ? ' active' : '');
+                    dot.setAttribute('aria-label', `Go to slide ${i + 1}`);
+                    dot.addEventListener('click', () => this.goToSlide(i));
+                    nav.appendChild(dot);
+                });
+                this.dots = nav.querySelectorAll('.nav-dot');
+            }
+
+            setupIntersectionObserver() {
+                const observer = new IntersectionObserver((entries) => {
+                    entries.forEach(entry => {
+                        if (entry.isIntersecting) {
+                            entry.target.classList.add('visible');
+                            const index = Array.from(this.slides).indexOf(entry.target);
+                            this.currentSlide = index;
+                            this.updateActiveDot(index);
+                            this.updateProgress();
+                        }
+                    });
+                }, { threshold: 0.5 });
+
+                this.slides.forEach(slide => observer.observe(slide));
+            }
+
+            setupKeyboardNav() {
+                document.addEventListener('keydown', (e) => {
+                    if (e.key === 'ArrowDown' || e.key === 'ArrowRight' || e.key === ' ') {
+                        e.preventDefault();
+                        this.goToSlide(Math.min(this.currentSlide + 1, this.totalSlides - 1));
+                    } else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') {
+                        e.preventDefault();
+                        this.goToSlide(Math.max(this.currentSlide - 1, 0));
+                    }
+                });
+            }
+
+            setupTouchNav() {
+                let startY = 0;
+                document.addEventListener('touchstart', (e) => { startY = e.touches[0].clientY; }, { passive: true });
+                document.addEventListener('touchend', (e) => {
+                    const diff = startY - e.changedTouches[0].clientY;
+                    if (Math.abs(diff) > 50) {
+                        if (diff > 0) this.goToSlide(Math.min(this.currentSlide + 1, this.totalSlides - 1));
+                        else this.goToSlide(Math.max(this.currentSlide - 1, 0));
+                    }
+                }, { passive: true });
+            }
+
+            goToSlide(index) {
+                this.slides[index].scrollIntoView({ behavior: 'smooth' });
+                this.currentSlide = index;
+                this.updateActiveDot(index);
+                this.updateProgress();
+            }
+
+            updateActiveDot(index) {
+                this.dots.forEach((dot, i) => {
+                    dot.classList.toggle('active', i === index);
+                });
+            }
+
+            updateProgress() {
+                const progress = ((this.currentSlide + 1) / this.totalSlides) * 100;
+                document.getElementById('progressBar').style.width = progress + '%';
+            }
+        }
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            new SlidePresentation();
+        });
+    </script>
+</body>
+</html>
