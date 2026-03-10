@@ -57,6 +57,7 @@ cells.append(code("""\
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from scipy.stats import linregress, pearsonr
 import logging
 import importlib
 
@@ -212,21 +213,19 @@ for combo_label, groups in [('GABA', GABA_GROUPS), ('Dopamine', DA_GROUPS)]:
             sg_window=SG_WINDOW, sg_order=SG_ORDER)
         r2_obs = xp['r2']
 
-        # Null model
-        null_res = null_cross_projection_r2(
-            results[spont_key], results[target_key],
-            neuron_groups=groups, n_permutations=1000,
-            window=WINDOW, event_idx=EVENT_IDX, dt=DT,
-            sg_window=SG_WINDOW, sg_order=SG_ORDER)
+        # Null model (returns tuple: observed_r2, null_r2s, p_value)
+        _, null_r2s, p_null = null_cross_projection_r2(
+            results[spont_key]['data'], results[target_key]['data'],
+            neuron_groups=groups, n_permutations=1000)
 
-        null_mean = np.mean(null_res['null_r2'])
-        null_std = np.std(null_res['null_r2'])
+        null_mean = float(np.mean(null_r2s))
+        null_std = float(np.std(null_r2s))
         z = (r2_obs - null_mean) / null_std if null_std > 0 else float('inf')
-        p = float((np.sum(null_res['null_r2'] >= r2_obs) + 1) / (len(null_res['null_r2']) + 1))
+        p = float((np.sum(null_r2s >= r2_obs) + 1) / (len(null_r2s) + 1))
 
         cross_proj_results[label] = {
             'r2': r2_obs, 'null_mean': null_mean, 'null_std': null_std,
-            'z': z, 'p': p, 'null_values': null_res['null_r2']}
+            'z': z, 'p': p, 'null_values': null_r2s}
         print(f"  {label:35s}  R2={r2_obs:.4f}  null={null_mean:.4f}+/-{null_std:.4f}  "
               f"z={z:.2f}  p={p:.4f}")
 
@@ -269,6 +268,8 @@ cells.append(md("""\
 - Is DA R-squared notably lower than GABA? → DA may have extra non-movement variance (partial support for RPE).
 - Are all p-values < 0.05? → Results significantly exceed autocorrelation-driven chance.
 
+**Why DA R-squared may be lower than GABA:** ToneFB DA neurons have CS-evoked phasic bursts and reward-associated variance that is entirely absent from SpontFB (which has no CS, no reward). SpontFB PCs cannot capture this extra variance, so DA R-squared drops. If GABA is purely movement-encoding, SpontFB PCs explain nearly all GABA variance → higher R-squared. Importantly, **a DA-GABA gap does not prove RPE**: the extra DA variance could be a sensory/salience response to the CS rather than value coding.
+
 ---
 """))
 
@@ -280,72 +281,153 @@ cells.append(md("""\
 
 If DA encodes movement direction, forward-selective (DF) and backward-selective (DB) neurons should show strong, opposite F/B trajectories. Same for GF/GB in GABA.
 
-**Method:** For each class with n >= 10 neurons, compute post-event mean fwd-bwd separation from the per-class PCA. **Null model:** phase-randomise each PC timecourse independently (`null_separation()`), testing whether observed separation exceeds what autocorrelation alone would produce.
+**Method:** For each class with n >= 10 neurons, compute fwd-bwd separation in **multiple time windows** from the per-class PCA:
+- **Pre-event** [-1.5, 0)s: baseline before alignment event (expect low separation)
+- **Early post** [0, 0.5)s: movement onset phase
+- **Late post** [0.5, 1.0)s: sustained movement
+- **Around reward** [0.8, 1.2)s: reward delivery window (ToneFB reward at t=1.0s)
+- **Full post-event** [0, 1.5)s: entire post-event period
 
-**Prediction (movement):** DF and DB have high separation in SpontFB AND CRFB (both are movement contexts). GF and GB have high separation across all datasets. GFB may show moderate separation if bidirectional GABA still encodes direction.
+"Post-event" = timepoints after the alignment event (t >= 0), i.e., after movement onset (SpontFB/CRFB) or CS onset (ToneFB).
 
-**Prediction (RPE):** DA classes show lower separation than GABA classes (DA variance driven by value, not direction). DF/DB separation should be weaker in ToneFB (CS dominates DA variance, reducing directional structure).
+**Null model:** Phase-randomise fwd and bwd PC timecourses independently (`_phase_randomise`), preserving autocorrelation but destroying cross-condition structure. Run once, extract window-specific null means. Null mean shown as dashed line.
+
+**Normalization:** Raw separation depends on PC-space scale (varies across classes due to different neuron counts). To enable cross-class comparison, separation is also shown normalized by pre-event baseline (fold-change over baseline).
+
+**Prediction (movement):** DF/DB have high separation in SpontFB AND CRFB. GF/GB high across all datasets. Separation should increase post-event (movement onset) and remain elevated.
+
+**Prediction (RPE):** DA classes show lower separation than GABA. DF/DB separation weaker in ToneFB.
 """))
 
 cells.append(code("""\
-# Test 2: Per-class separation + null model
+# Test 2: Per-class separation — multi-window + normalization + null model
+N_PERMS_T2 = 1000
+rng_t2 = np.random.default_rng(42)
+
+# Define time windows (indices in windowed data; event at index WINDOW=150)
+WIN_DEFS = {
+    'pre_event':     slice(0, WINDOW),                    # [-1.5, 0) s
+    'early_post':    slice(WINDOW, WINDOW + 50),          # [0, 0.5) s
+    'late_post':     slice(WINDOW + 50, WINDOW + 100),    # [0.5, 1.0) s
+    'around_reward': slice(WINDOW + 80, WINDOW + 120),    # [0.8, 1.2) s
+    'full_post':     slice(WINDOW, 2 * WINDOW + 1),       # [0, 1.5] s
+}
+
 sep_results = []
 
 for key, r in sorted(single_class_results.items()):
     ds_name = key.split('_')[0]
     cls_name = '_'.join(key.split('_')[1:])
 
-    # Run null separation
-    ns = null_separation(
-        r['smooth_data'], r['window_data'],
-        n_permutations=1000, seed=42)
+    fwd = r['smooth_data']['fwd_smooth']  # (n_pcs, n_t)
+    bwd = r['smooth_data']['bwd_smooth']
 
-    obs_sep = ns['observed_separation']
-    null_mean = float(np.mean(ns['null_separations']))
-    null_std = float(np.std(ns['null_separations']))
-    z = (obs_sep - null_mean) / null_std if null_std > 0 else float('inf')
-    p = ns['p_value']
+    # Full separation timecourse
+    sep_t = np.sqrt(np.sum((fwd - bwd)**2, axis=0))
 
-    sep_results.append({
-        'key': key, 'dataset': ds_name, 'class': cls_name,
-        'n_neurons': r['n_neurons'], 'separation': obs_sep,
-        'null_mean': null_mean, 'z': z, 'p': p})
-    sig = '***' if p < 0.001 else '**' if p < 0.01 else '*' if p < 0.05 else 'ns'
-    print(f"  {key:25s}  n={r['n_neurons']:4d}  sep={obs_sep:6.2f}  "
-          f"z={z:5.2f}  p={p:.4f} {sig}")
+    # Observed window means
+    obs_wins = {wn: float(np.mean(sep_t[ws])) for wn, ws in WIN_DEFS.items()}
+    pre_baseline = obs_wins['pre_event']
 
-# Plot: grouped by class, colored by dataset
+    # Phase-randomise ONCE, store full null timecourses
+    n_t = fwd.shape[1]
+    null_tc = np.empty((N_PERMS_T2, n_t))
+    for i in range(N_PERMS_T2):
+        fwd_null = _phase_randomise(fwd, rng_t2)
+        bwd_null = _phase_randomise(bwd, rng_t2)
+        null_tc[i] = np.sqrt(np.sum((fwd_null - bwd_null)**2, axis=0))
+
+    # Extract window-specific null distributions
+    null_wins = {wn: np.mean(null_tc[:, ws], axis=1) for wn, ws in WIN_DEFS.items()}
+
+    # p-value and z-score per window
+    row = {'key': key, 'dataset': ds_name, 'class': cls_name,
+           'n_neurons': r['n_neurons'], 'sep_t': sep_t, 'pre_baseline': pre_baseline}
+    for wn in WIN_DEFS:
+        obs_val = obs_wins[wn]
+        null_arr = null_wins[wn]
+        nm = float(np.mean(null_arr))
+        ns = float(np.std(null_arr))
+        zs = (obs_val - nm) / ns if ns > 0 else float('inf')
+        pv = float((np.sum(null_arr >= obs_val) + 1) / (N_PERMS_T2 + 1))
+        ratio = obs_val / pre_baseline if pre_baseline > 0 else np.nan
+        null_ratio = nm / pre_baseline if pre_baseline > 0 else np.nan
+        row[f'{wn}_sep'] = obs_val
+        row[f'{wn}_null_mean'] = nm
+        row[f'{wn}_z'] = zs
+        row[f'{wn}_p'] = pv
+        row[f'{wn}_ratio'] = ratio
+        row[f'{wn}_null_ratio'] = null_ratio
+
+    sep_results.append(row)
+    sig_fp = '***' if row['full_post_p'] < 0.001 else '**' if row['full_post_p'] < 0.01 else '*' if row['full_post_p'] < 0.05 else 'ns'
+    print(f"  {key:20s}  n={r['n_neurons']:3d}  "
+          f"pre={obs_wins['pre_event']:.1f}  early={obs_wins['early_post']:.1f}  "
+          f"late={obs_wins['late_post']:.1f}  rew={obs_wins['around_reward']:.1f}  "
+          f"full_post z={row['full_post_z']:.1f} {sig_fp}")
+
+# ── Plot 1: Multi-window bar chart (raw) with null mean dashed lines ──
 sep_df = pd.DataFrame(sep_results)
 classes_order = ['DF', 'DB', 'D', 'DFB', 'GF', 'GB', 'G', 'GFB']
 ds_colors = {'SpontFB': 'steelblue', 'CRFB': 'coral', 'ToneFB': 'seagreen'}
 
+for win_name in ['full_post', 'early_post', 'late_post', 'around_reward']:
+    fig, ax = plt.subplots(figsize=(14, 5))
+    bar_width = 0.25
+    for i, ds in enumerate(['SpontFB', 'CRFB', 'ToneFB']):
+        subset = sep_df[sep_df['dataset'] == ds]
+        positions, heights, null_ms, stars = [], [], [], []
+        for j, cls in enumerate(classes_order):
+            match = subset[subset['class'] == cls]
+            if len(match) == 0:
+                continue
+            positions.append(j + (i - 1) * bar_width)
+            heights.append(match.iloc[0][f'{win_name}_sep'])
+            null_ms.append(match.iloc[0][f'{win_name}_null_mean'])
+            stars.append(match.iloc[0][f'{win_name}_p'])
+        ax.bar(positions, heights, bar_width, label=ds, color=ds_colors[ds], alpha=0.8)
+        # Null mean dashed lines
+        for pos, nm_val in zip(positions, null_ms):
+            ax.hlines(nm_val, pos - bar_width/2, pos + bar_width/2,
+                      colors='black', linestyles='--', linewidth=0.8, alpha=0.6)
+        for pos, h, pv in zip(positions, heights, stars):
+            if pv < 0.001:
+                ax.text(pos, h + 0.3, '***', ha='center', fontsize=8)
+            elif pv < 0.01:
+                ax.text(pos, h + 0.3, '**', ha='center', fontsize=8)
+            elif pv < 0.05:
+                ax.text(pos, h + 0.3, '*', ha='center', fontsize=8)
+    ax.set_xticks(range(len(classes_order)))
+    ax.set_xticklabels(classes_order)
+    ax.set_ylabel('Fwd-bwd separation')
+    wlabel = win_name.replace('_', ' ').title()
+    ax.set_title(f'Test 2: {wlabel} Separation (dashed = null mean)')
+    ax.legend()
+    plt.tight_layout()
+    plt.show()
+
+# ── Plot 2: Normalized (ratio to pre-event baseline) for full_post ──
 fig, ax = plt.subplots(figsize=(14, 5))
 bar_width = 0.25
 for i, ds in enumerate(['SpontFB', 'CRFB', 'ToneFB']):
     subset = sep_df[sep_df['dataset'] == ds]
-    positions = []
-    heights = []
-    stars = []
+    positions, heights, null_ms = [], [], []
     for j, cls in enumerate(classes_order):
-        row = subset[subset['class'] == cls]
-        if len(row) == 0:
+        match = subset[subset['class'] == cls]
+        if len(match) == 0:
             continue
         positions.append(j + (i - 1) * bar_width)
-        heights.append(row.iloc[0]['separation'])
-        stars.append(row.iloc[0]['p'])
+        heights.append(match.iloc[0]['full_post_ratio'])
+        null_ms.append(match.iloc[0]['full_post_null_ratio'])
     ax.bar(positions, heights, bar_width, label=ds, color=ds_colors[ds], alpha=0.8)
-    for pos, h, p in zip(positions, heights, stars):
-        if p < 0.001:
-            ax.text(pos, h + 0.3, '***', ha='center', fontsize=8)
-        elif p < 0.01:
-            ax.text(pos, h + 0.3, '**', ha='center', fontsize=8)
-        elif p < 0.05:
-            ax.text(pos, h + 0.3, '*', ha='center', fontsize=8)
-
+    for pos, nm_val in zip(positions, null_ms):
+        ax.hlines(nm_val, pos - bar_width/2, pos + bar_width/2,
+                  colors='black', linestyles='--', linewidth=0.8, alpha=0.6)
+ax.axhline(1.0, color='gray', ls=':', alpha=0.4, label='Baseline (1.0)')
 ax.set_xticks(range(len(classes_order)))
 ax.set_xticklabels(classes_order)
-ax.set_ylabel('Post-event mean fwd-bwd separation')
-ax.set_title('Test 2: Per-Class Direction Selectivity (*** p<0.001, ** p<0.01, * p<0.05)')
+ax.set_ylabel('Separation / pre-event baseline')
+ax.set_title('Test 2: Normalized Direction Selectivity (fold-change over baseline)')
 ax.legend()
 plt.tight_layout()
 plt.show()
@@ -359,6 +441,10 @@ cells.append(md("""\
 - Do GF and GB show significant separation across all datasets? → Direction encoding confirmed in GABA.
 - Is separation weaker in ToneFB for DA classes? → CS-evoked synchronisation may temporarily reduce directional structure.
 - Does GFB show any separation? → Bidirectional GABA still has directional sensitivity.
+- **Multi-window:** Does separation increase from pre-event → early-post → late-post? Confirms movement-locked dynamics.
+- **Around-reward window:** For ToneFB, is the reward window different from late-post? If similar → reward doesn't add anything.
+- **Normalized values:** Are fold-changes comparable across classes despite different raw scales?
+- **Null mean (dashed lines):** Bars well above null mean = genuine directional structure beyond autocorrelation.
 
 ---
 """))
@@ -369,29 +455,33 @@ cells.append(md("""\
 cells.append(md("""\
 ## Test 3: Are GF/GB Neurons Blind to Reward Delivery?
 
-If GABA direction neurons are pure movement encoders, their fwd-bwd separation should be **unchanged** at reward delivery time (t=700 in ToneFB). The separation timecourse should be flat through the reward window.
+If GABA direction neurons are pure movement encoders, their fwd-bwd separation should be **unchanged** at reward delivery time (t=700 in ToneFB). The separation timecourse should show no discontinuity at reward.
 
-**Method:** Compute instantaneous fwd-bwd separation ||fwd(t) - bwd(t)|| at each timepoint for GF and GB in ToneFB. Compare mean separation in a pre-reward window [50, 90] (relative to event) to a post-reward window [110, 150]. **Null:** circularly shift the separation timecourse 1000 times and recompute the pre-vs-post difference.
+**Method:** Three complementary analyses on GF/GB separation timecourse in ToneFB:
 
-**Control:** Same analysis on SpontFB at the equivalent post-event latency (no reward present).
+1. **Mean pre-vs-post:** Compare mean separation in pre-reward [0.5, 0.9]s vs post-reward [1.1, 1.5]s. Null: circular shift of timecourse.
+2. **Derivative at reward:** Compute numerical derivative of separation. Test if the derivative at reward time (t=1.0s) is significantly different from zero. Null: circular shift.
+3. **Slope change:** Fit linear regression to separation in 50-timestep windows before and after reward. Test if slope changes at reward. Null: circular shift.
 
-**Prediction (movement):** No significant change in separation at reward time. The separation timecourse follows movement kinematics, not reward delivery.
+**Control:** Same analysis on SpontFB at matched post-event latency (no reward).
 
-**Prediction (RPE):** If GABA receives reward signals, separation should change at reward time (new deflection, acceleration, or collapse).
+**Visualization:** ToneFB and SpontFB separation timecourses overlaid on same axes for direct visual comparison. Separation normalized by pre-event baseline for comparability.
+
+**Prediction (movement):** No significant change — all three tests yield p > 0.05. ToneFB and SpontFB timecourses look similar at matched latency.
+
+**Prediction (RPE):** Significant derivative or slope change at reward time. ToneFB diverges from SpontFB at t=700.
 """))
 
 cells.append(code("""\
-# Test 3: GF/GB reward insensitivity — separation timecourse around reward
+# Test 3: GF/GB reward insensitivity — three analyses
 reward_insensitivity_results = {}
-
-# In the windowed data, event is at index WINDOW (=150).
-# Reward is at event + 100 = index 250 in the windowed data (for ToneFB).
-# Pre-reward: indices [200, 240] = event-relative [50, 90]
-# Post-reward: indices [260, 300] = event-relative [110, 150]
-PRE_REWARD_SLICE  = slice(200, 240)
-POST_REWARD_SLICE = slice(260, 300)
-# For SpontFB: same indices (matched post-event latency, no reward)
-rng = np.random.default_rng(42)
+REWARD_IDX = WINDOW + 100  # reward at index 250 in windowed data
+PRE_REWARD_SLICE  = slice(200, 240)   # [0.5, 0.9]s
+POST_REWARD_SLICE = slice(260, 300)   # [1.1, 1.5]s
+DERIV_HW = 10  # half-width for derivative window
+SLOPE_LEN = 50  # timesteps for slope regression
+N_PERMS_T3 = 1000
+rng_t3 = np.random.default_rng(42)
 
 for cls in ['GF', 'GB', 'GFB']:
     for ds in ['ToneFB', 'SpontFB']:
@@ -399,61 +489,100 @@ for cls in ['GF', 'GB', 'GFB']:
         if key not in single_class_results:
             continue
         r = single_class_results[key]
-        sd = r['smooth_data']
-        fwd = sd['fwd_smooth']  # shape (3, n_timepoints)
-        bwd = sd['bwd_smooth']
+        fwd = r['smooth_data']['fwd_smooth']
+        bwd = r['smooth_data']['bwd_smooth']
 
-        # Instantaneous separation timecourse
+        # Separation timecourse + normalize by pre-event baseline
         sep_t = np.sqrt(np.sum((fwd - bwd)**2, axis=0))
+        pre_baseline = float(np.mean(sep_t[:WINDOW]))
+        sep_norm = sep_t / pre_baseline if pre_baseline > 0 else sep_t
 
-        # Pre-vs-post reward difference
+        # ── Analysis 1: Mean pre-vs-post ──
         pre_sep = np.mean(sep_t[PRE_REWARD_SLICE])
         post_sep = np.mean(sep_t[POST_REWARD_SLICE])
         obs_delta = post_sep - pre_sep
 
-        # Null: circular shift
-        n_t = len(sep_t)
-        null_deltas = np.empty(1000)
-        for i in range(1000):
-            shift = rng.integers(1, n_t)
-            sep_shifted = np.roll(sep_t, shift)
-            null_deltas[i] = (np.mean(sep_shifted[POST_REWARD_SLICE])
-                              - np.mean(sep_shifted[PRE_REWARD_SLICE]))
+        # ── Analysis 2: Derivative at reward time ──
+        d_sep = np.gradient(sep_t)
+        obs_deriv = float(np.mean(d_sep[REWARD_IDX - DERIV_HW : REWARD_IDX + DERIV_HW]))
 
-        p = float((np.sum(np.abs(null_deltas) >= np.abs(obs_delta)) + 1) / 1001)
-        z = (obs_delta - np.mean(null_deltas)) / np.std(null_deltas) if np.std(null_deltas) > 0 else 0
+        # ── Analysis 3: Slope change at reward ──
+        x_pre = np.arange(SLOPE_LEN, dtype=float)
+        x_post = np.arange(SLOPE_LEN, dtype=float)
+        slope_pre = linregress(x_pre, sep_t[REWARD_IDX - SLOPE_LEN : REWARD_IDX]).slope
+        slope_post = linregress(x_post, sep_t[REWARD_IDX : REWARD_IDX + SLOPE_LEN]).slope
+        obs_slope_change = slope_post - slope_pre
+
+        # ── Combined null: circular shift (one loop for all 3 metrics) ──
+        n_t = len(sep_t)
+        null_deltas = np.empty(N_PERMS_T3)
+        null_derivs = np.empty(N_PERMS_T3)
+        null_slopes = np.empty(N_PERMS_T3)
+        for i in range(N_PERMS_T3):
+            shift = rng_t3.integers(1, n_t)
+            sep_s = np.roll(sep_t, shift)
+            null_deltas[i] = np.mean(sep_s[POST_REWARD_SLICE]) - np.mean(sep_s[PRE_REWARD_SLICE])
+            d_s = np.gradient(sep_s)
+            null_derivs[i] = np.mean(d_s[REWARD_IDX - DERIV_HW : REWARD_IDX + DERIV_HW])
+            sl_pre = linregress(x_pre, sep_s[REWARD_IDX - SLOPE_LEN : REWARD_IDX]).slope
+            sl_post = linregress(x_post, sep_s[REWARD_IDX : REWARD_IDX + SLOPE_LEN]).slope
+            null_slopes[i] = sl_post - sl_pre
+
+        p_delta = float((np.sum(np.abs(null_deltas) >= np.abs(obs_delta)) + 1) / (N_PERMS_T3 + 1))
+        p_deriv = float((np.sum(np.abs(null_derivs) >= np.abs(obs_deriv)) + 1) / (N_PERMS_T3 + 1))
+        p_slope = float((np.sum(np.abs(null_slopes) >= np.abs(obs_slope_change)) + 1) / (N_PERMS_T3 + 1))
 
         reward_insensitivity_results[key] = {
-            'sep_timecourse': sep_t, 'pre': pre_sep, 'post': post_sep,
-            'delta': obs_delta, 'p': p, 'z': z}
-        sig = '***' if p < 0.001 else '**' if p < 0.01 else '*' if p < 0.05 else 'ns'
-        print(f"  {key:20s}  pre_sep={pre_sep:.2f}  post_sep={post_sep:.2f}  "
-              f"delta={obs_delta:+.2f}  z={z:.2f}  p={p:.4f} {sig}")
+            'sep_t': sep_t, 'sep_norm': sep_norm, 'pre_baseline': pre_baseline,
+            'delta': obs_delta, 'p_delta': p_delta,
+            'deriv': obs_deriv, 'p_deriv': p_deriv,
+            'slope_change': obs_slope_change, 'p_slope': p_slope}
 
-# Plot separation timecourses
+        print(f"  {key:20s}  "
+              f"delta={obs_delta:+.2f} p={p_delta:.3f}  "
+              f"deriv={obs_deriv:+.3f} p={p_deriv:.3f}  "
+              f"slope_chg={obs_slope_change:+.4f} p={p_slope:.3f}")
+
+# ── Plot 1: ToneFB vs SpontFB overlay (normalized) per class ──
 for cls in ['GF', 'GB', 'GFB']:
-    fig, axes = plt.subplots(1, 2, figsize=(14, 4), sharey=True)
-    for ax, ds in zip(axes, ['ToneFB', 'SpontFB']):
-        key = f'{ds}_{cls}'
-        if key not in reward_insensitivity_results:
-            ax.set_title(f'{key}: not available')
-            continue
-        ri = reward_insensitivity_results[key]
-        t_axis = np.arange(len(ri['sep_timecourse'])) - WINDOW
-        t_axis_s = t_axis * DT
-        ax.plot(t_axis_s, ri['sep_timecourse'], color='black', linewidth=1)
-        ax.axvline(0, color='gray', ls='--', alpha=0.5, label='Event')
-        if ds == 'ToneFB':
-            ax.axvline(1.0, color='gold', ls='--', linewidth=2, label='Reward')
-        # Shade pre/post windows
-        ax.axvspan(0.5, 0.9, alpha=0.15, color='blue', label='Pre-reward')
-        ax.axvspan(1.1, 1.5, alpha=0.15, color='red', label='Post-reward')
-        ax.set_xlabel('Time from event (s)')
-        ax.set_ylabel('Fwd-bwd separation')
-        p_val = ri['p']
-        ax.set_title(f'{key}  delta={ri["delta"]:+.2f}  p={p_val:.3f}')
-        ax.legend(fontsize=7)
-    plt.suptitle(f'Test 3: {cls} Separation Timecourse Around Reward', fontsize=12)
+    tone_key = f'ToneFB_{cls}'
+    spont_key = f'SpontFB_{cls}'
+    if tone_key not in reward_insensitivity_results:
+        continue
+    fig, axes = plt.subplots(1, 2, figsize=(14, 4))
+
+    # Left: overlay normalized timecourses
+    ax = axes[0]
+    t_axis_s = (np.arange(2 * WINDOW + 1) - WINDOW) * DT
+    if tone_key in reward_insensitivity_results:
+        ax.plot(t_axis_s, reward_insensitivity_results[tone_key]['sep_norm'],
+                color='darkorange', linewidth=1.5, label='ToneFB')
+    if spont_key in reward_insensitivity_results:
+        ax.plot(t_axis_s, reward_insensitivity_results[spont_key]['sep_norm'],
+                color='steelblue', linewidth=1.5, label='SpontFB')
+    ax.axvline(0, color='gray', ls='--', alpha=0.5, label='Event')
+    ax.axvline(1.0, color='gold', ls='--', linewidth=2, label='Reward (ToneFB)')
+    ax.axhline(1.0, color='gray', ls=':', alpha=0.3)
+    ax.set_xlabel('Time from event (s)')
+    ax.set_ylabel('Separation / pre-event baseline')
+    ax.set_title(f'{cls}: Normalized separation overlay')
+    ax.legend(fontsize=7)
+
+    # Right: raw timecourse with windows shaded
+    ax = axes[1]
+    ri = reward_insensitivity_results[tone_key]
+    ax.plot(t_axis_s, ri['sep_t'], color='black', linewidth=1)
+    ax.axvline(0, color='gray', ls='--', alpha=0.5)
+    ax.axvline(1.0, color='gold', ls='--', linewidth=2, label='Reward')
+    ax.axvspan(0.5, 0.9, alpha=0.15, color='blue', label='Pre-reward')
+    ax.axvspan(1.1, 1.5, alpha=0.15, color='red', label='Post-reward')
+    ax.set_xlabel('Time from event (s)')
+    ax.set_ylabel('Fwd-bwd separation')
+    ax.set_title(f'{tone_key}  delta p={ri["p_delta"]:.3f}  '
+                 f'deriv p={ri["p_deriv"]:.3f}  slope p={ri["p_slope"]:.3f}')
+    ax.legend(fontsize=7)
+
+    plt.suptitle(f'Test 3: {cls} Reward Insensitivity', fontsize=12)
     plt.tight_layout()
     plt.show()
 """))
@@ -462,9 +591,11 @@ cells.append(md("""\
 ### Test 3 -- Interpretation
 
 **Fill based on results:**
-- Is the delta non-significant for GF/GB in ToneFB? → GABA direction neurons are blind to reward. **Strong support for movement theory.**
-- Is the delta also non-significant in SpontFB? → Confirms baseline: no change expected at matched latency.
-- If delta IS significant for GF/GB → GABA receives reward signals, complicating the pure-movement interpretation.
+- Are ALL THREE tests (delta, derivative, slope) non-significant for GF/GB in ToneFB? → **Strong evidence:** GABA direction neurons are blind to reward.
+- Is only the mean delta non-significant but derivative or slope significant? → There may be a transient reward response that the mean comparison misses.
+- Do ToneFB and SpontFB normalized timecourses overlap through the reward window? → Visually confirms no reward effect.
+- Is SpontFB also non-significant at matched latency? → Confirms baseline: no change expected.
+- If any test IS significant for GF/GB → GABA receives reward signals, complicating the pure-movement interpretation.
 
 ---
 """))
@@ -473,26 +604,43 @@ cells.append(md("""\
 # TEST 4: Reward-Time Deflection Null
 # ============================================================
 cells.append(md("""\
-## Test 4: Is There a Reward-Specific Speed Transient?
+## Test 4: The Deflection at t=700 — Movement or Reward?
 
-If reward delivery triggers a distinct neural event, trajectory speed should spike at t=700 in ToneFB. SpontFB (no reward) is the control.
+There IS a speed transient near t=700 in ToneFB. **The question is not whether it exists, but whether it matches movement dynamics rather than reward processing.** This is the core subtlety of our experiment: reward delivery (t=700) coincides with CR movement execution.
 
-**Method:** `null_reward_deflection()` runs two tests:
-1. **Within-ToneFB:** Is speed at reward time higher than at other post-event timepoints? (circular time-shift null)
-2. **Between-datasets:** Is ToneFB speed at reward time different from SpontFB at matched latency? (bootstrap permutation)
+**Method:** Three complementary analyses:
+1. **Within-ToneFB null:** Is speed at reward time higher than at other post-event timepoints? (circular time-shift, `null_reward_deflection()`)
+2. **Between-datasets null:** Is ToneFB speed at reward time different from SpontFB at matched latency? (bootstrap permutation)
+3. **CRFB speed comparison (NEW):** Compute the speed profile for CRFB aligned to movement onset. If the ToneFB speed profile around reward time matches the CRFB speed profile around movement onset, the deflection is movement-related, not reward-related. Quantify with Pearson correlation.
 
-**Prediction (movement):** Both p-values non-significant. Any speed at reward time reflects ongoing CR movement. ToneFB and SpontFB have similar speed at matched post-movement latency.
+**Prediction (movement):**
+- Within-ToneFB may be significant (there IS a speed peak — it's the CR movement).
+- Between-datasets may be non-significant (SpontFB also has movement-related speed).
+- **CRFB correlation is HIGH** (r > 0.8): the speed profile around ToneFB reward matches the speed profile around CRFB movement onset. This proves the deflection is movement.
 
-**Prediction (RPE):** Significant within-ToneFB p-value (speed spike at reward) AND significant between-dataset difference.
-
-**Caveat:** A significant within-ToneFB result alone is ambiguous -- it could reflect the CR movement peaking near reward time. The between-dataset test is the more informative one.
+**Prediction (RPE):**
+- Between-datasets significant (ToneFB has extra reward-specific speed that SpontFB lacks).
+- CRFB correlation is LOW: the reward-time speed profile has a different shape than pure movement.
 """))
 
 cells.append(code("""\
-# Test 4: Reward-time deflection null
-for combo_label in ['GABA', 'Dopamine']:
+# Test 4: Reward-time deflection — null models + CRFB speed comparison
+speed_comparison_results = {}
+
+def _compute_speed(smooth_data, dt):
+    \"\"\"Mean speed of fwd and bwd trajectories.\"\"\"
+    fwd = smooth_data['fwd_smooth']
+    bwd = smooth_data['bwd_smooth']
+    diff_fwd = np.diff(fwd, axis=1) / dt
+    diff_bwd = np.diff(bwd, axis=1) / dt
+    speed_fwd = np.sqrt(np.sum(diff_fwd**2, axis=0))
+    speed_bwd = np.sqrt(np.sum(diff_bwd**2, axis=0))
+    return (speed_fwd + speed_bwd) / 2.0
+
+for combo_label in ['Dopamine', 'GABA']:
     tone_key = f'ToneFB_{combo_label}'
     spont_key = f'SpontFB_{combo_label}'
+    crfb_key = f'CRFB_{combo_label}'
     if tone_key not in results or spont_key not in results:
         continue
 
@@ -500,6 +648,7 @@ for combo_label in ['GABA', 'Dopamine']:
     print(f"  {combo_label}")
     print(f"{'='*60}")
 
+    # ── Part A: Within + Between null models ──
     null_rd = null_reward_deflection(
         results[tone_key]['smooth_data'], results[tone_key]['window_data'],
         results[spont_key]['smooth_data'], results[spont_key]['window_data'],
@@ -508,29 +657,68 @@ for combo_label in ['GABA', 'Dopamine']:
 
     wt = null_rd['within_task']
     bt = null_rd['between_datasets']
-    print(f"  Within-ToneFB:  observed_speed={wt['observed_speed']:.4f}  "
-          f"p={wt['p_value']:.4f}")
-    print(f"  Between-dataset: task={bt['task_speed']:.4f}  ctrl={bt['ctrl_speed']:.4f}  "
-          f"diff={bt['observed_diff']:+.4f}  p={bt['p_value']:.4f}")
+    print(f"  Within-ToneFB:  speed={wt['observed_speed']:.4f}  p={wt['p_value']:.4f}")
+    print(f"  Between-dataset: diff={bt['observed_diff']:+.4f}  p={bt['p_value']:.4f}")
 
-    # Plot null distributions
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    # ── Part B: CRFB speed comparison ──
+    tone_speed = _compute_speed(results[tone_key]['smooth_data'], DT)
+    crfb_speed = _compute_speed(results[crfb_key]['smooth_data'], DT) if crfb_key in results else None
+    spont_speed = _compute_speed(results[spont_key]['smooth_data'], DT)
+
+    # CRFB: movement onset at index WINDOW (=150) in windowed speed (len=300)
+    # ToneFB: CS at WINDOW, CR movement ~100 timesteps later → reward at WINDOW+100
+    # Align by extracting ±hw around each movement onset
+    hw = 80  # half-width for comparison window
+    crfb_corr, crfb_p = np.nan, np.nan
+    if crfb_speed is not None:
+        crfb_window = crfb_speed[WINDOW - hw : WINDOW + hw]
+        tone_window = tone_speed[WINDOW + 100 - hw : WINDOW + 100 + hw]
+        if len(crfb_window) == len(tone_window) and len(crfb_window) > 0:
+            crfb_corr, crfb_p = pearsonr(crfb_window, tone_window)
+        print(f"  CRFB-ToneFB speed correlation: r={crfb_corr:.4f}  p={crfb_p:.6f}")
+
+    speed_comparison_results[combo_label] = {
+        'within_p': wt['p_value'], 'between_p': bt['p_value'],
+        'crfb_corr': crfb_corr, 'crfb_p': crfb_p}
+
+    # ── Plot: null distributions + speed overlay ──
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4))
 
     ax = axes[0]
     ax.hist(wt['null_speeds'], bins=40, color='lightcoral', alpha=0.7, label='Null')
     ax.axvline(wt['observed_speed'], color='black', linewidth=2, label='Observed')
-    ax.set_title(f'{combo_label}: Within-ToneFB (p={wt["p_value"]:.4f})')
+    ax.set_title(f'Within-ToneFB (p={wt["p_value"]:.4f})')
     ax.set_xlabel('Speed at reward time')
-    ax.legend()
+    ax.legend(fontsize=7)
 
     ax = axes[1]
     ax.hist(bt['null_diffs'], bins=40, color='lightblue', alpha=0.7, label='Null diffs')
     ax.axvline(bt['observed_diff'], color='black', linewidth=2, label='Observed diff')
-    ax.set_title(f'{combo_label}: Between-dataset (p={bt["p_value"]:.4f})')
-    ax.set_xlabel('Speed difference (ToneFB - SpontFB)')
-    ax.legend()
+    ax.set_title(f'Between-dataset (p={bt["p_value"]:.4f})')
+    ax.set_xlabel('Speed diff (ToneFB - SpontFB)')
+    ax.legend(fontsize=7)
 
-    plt.suptitle(f'Test 4: Reward-Time Speed Deflection ({combo_label})')
+    # Speed overlay: CRFB (aligned to movement) vs ToneFB (shifted to align movement)
+    ax = axes[2]
+    t_overlay = (np.arange(2 * hw) - hw) * DT  # time relative to movement onset
+    if crfb_speed is not None and len(crfb_window) == 2 * hw:
+        ax.plot(t_overlay, crfb_window, color='coral', linewidth=1.5,
+                label='CRFB (at movement)')
+    if len(tone_window) == 2 * hw:
+        ax.plot(t_overlay, tone_window, color='seagreen', linewidth=1.5,
+                label='ToneFB (at reward=movement)')
+    spont_window = spont_speed[WINDOW - hw : WINDOW + hw]
+    if len(spont_window) == 2 * hw:
+        ax.plot(t_overlay, spont_window, color='steelblue', linewidth=1.5,
+                alpha=0.6, label='SpontFB (at movement)')
+    ax.axvline(0, color='gray', ls='--', alpha=0.5)
+    corr_str = f'r={crfb_corr:.3f}' if not np.isnan(crfb_corr) else 'N/A'
+    ax.set_title(f'Speed profiles aligned to movement ({corr_str})')
+    ax.set_xlabel('Time from movement onset (s)')
+    ax.set_ylabel('Trajectory speed')
+    ax.legend(fontsize=7)
+
+    plt.suptitle(f'Test 4: {combo_label} — Speed at Reward Time', fontsize=12)
     plt.tight_layout()
     plt.show()
 """))
@@ -539,9 +727,10 @@ cells.append(md("""\
 ### Test 4 -- Interpretation
 
 **Fill based on results:**
-- Both p-values non-significant → No reward-specific speed transient. Consistent with movement theory.
-- Within significant, between non-significant → Speed peak at reward time exists but is similar to SpontFB at matched latency → likely movement-driven.
-- Both significant → Evidence for a genuine reward-locked signal. Characterise its magnitude relative to the overall movement signal.
+- **CRFB correlation high (r > 0.8):** The speed profile around ToneFB reward time matches the speed profile around CRFB movement onset → **the deflection IS movement.** This is the most informative result.
+- Within-ToneFB significant, but between non-significant → The peak exists but SpontFB has a similar one at matched latency → movement-driven.
+- Both null tests non-significant → No reward-specific transient at all.
+- If CRFB correlation is low AND between-datasets is significant → Genuine reward-specific speed signal that doesn't match pure movement kinematics.
 
 ---
 """))
@@ -604,6 +793,12 @@ for key, r in test_keys:
     late_sep = float(np.mean(sep_t[LATE_SLICE]))
     obs_diff = late_sep - cs_sep
 
+    # Normalized by pre-event baseline
+    PRE_SLICE_T5 = slice(0, WINDOW)
+    pre_baseline_t5 = float(np.mean(sep_t[PRE_SLICE_T5]))
+    cs_ratio = cs_sep / pre_baseline_t5 if pre_baseline_t5 > 0 else np.nan
+    late_ratio = late_sep / pre_baseline_t5 if pre_baseline_t5 > 0 else np.nan
+
     # Permutation: circularly shift fwd and bwd independently
     n_t = fwd.shape[1]
     null_diffs = np.empty(1000)
@@ -620,6 +815,7 @@ for key, r in test_keys:
 
     dir_sensitivity_results[key] = {
         'cs_sep': cs_sep, 'late_sep': late_sep, 'diff': obs_diff,
+        'cs_ratio': cs_ratio, 'late_ratio': late_ratio,
         'p': p, 'z': z, 'sep_t': sep_t}
     sig = '***' if p < 0.001 else '**' if p < 0.01 else '*' if p < 0.05 else 'ns'
     print(f"  {key:25s}  CS_sep={cs_sep:6.2f}  Late_sep={late_sep:6.2f}  "
@@ -660,8 +856,23 @@ ax.bar(x - 0.15, cs_vals, 0.3, label='CS window [0, 0.4s]', color='cyan', alpha=
 ax.bar(x + 0.15, late_vals, 0.3, label='Late window [0.6, 1.0s]', color='orange', alpha=0.8)
 ax.set_xticks(x)
 ax.set_xticklabels([k.replace('ToneFB_', '') for k in pop_keys], rotation=30)
-ax.set_ylabel('Mean fwd-bwd separation')
-ax.set_title('Test 5: Direction Sensitivity — CS vs Late Window')
+ax.set_ylabel('Mean fwd-bwd separation (raw)')
+ax.set_title('Test 5: Direction Sensitivity — CS vs Late Window (raw)')
+ax.legend()
+plt.tight_layout()
+plt.show()
+
+# Normalized bar plot (ratio to pre-event baseline)
+fig, ax = plt.subplots(figsize=(10, 5))
+cs_ratios = [dir_sensitivity_results[k].get('cs_ratio', np.nan) for k in pop_keys]
+late_ratios = [dir_sensitivity_results[k].get('late_ratio', np.nan) for k in pop_keys]
+ax.bar(x - 0.15, cs_ratios, 0.3, label='CS window [0, 0.4s]', color='cyan', alpha=0.8)
+ax.bar(x + 0.15, late_ratios, 0.3, label='Late window [0.6, 1.0s]', color='orange', alpha=0.8)
+ax.axhline(1.0, color='gray', ls=':', alpha=0.4, label='Baseline (1.0)')
+ax.set_xticks(x)
+ax.set_xticklabels([k.replace('ToneFB_', '') for k in pop_keys], rotation=30)
+ax.set_ylabel('Separation / pre-event baseline')
+ax.set_title('Test 5: Direction Sensitivity — CS vs Late (normalized)')
 ax.legend()
 plt.tight_layout()
 plt.show()
@@ -814,11 +1025,19 @@ for row in sep_results:
         supports = 'Movement' if row['p'] < 0.05 else 'No signal'
         print(f"T2: {row['key']:45s} sep={row['separation']:.2f}  p={row['p']:.4f}  {supports}")
 
-# Test 3: GF/GB reward insensitivity
+# Test 3: GF/GB reward insensitivity (3 metrics)
 for key, res in reward_insensitivity_results.items():
     if 'ToneFB' in key:
-        supports = 'Movement' if res['p'] > 0.05 else 'RPE?'
-        print(f"T3: {key:45s} delta={res['delta']:+.2f}  p={res['p']:.4f}  {supports}")
+        all_ns = res['p_delta'] > 0.05 and res['p_deriv'] > 0.05 and res['p_slope'] > 0.05
+        supports = 'Movement' if all_ns else 'RPE?'
+        print(f"T3: {key:45s} delta p={res['p_delta']:.3f}  deriv p={res['p_deriv']:.3f}  "
+              f"slope p={res['p_slope']:.3f}  {supports}")
+
+# Test 4: CRFB speed correlation
+for combo, res in speed_comparison_results.items():
+    corr_str = f"r={res['crfb_corr']:.3f}" if not np.isnan(res['crfb_corr']) else 'N/A'
+    supports = 'Movement' if res.get('crfb_corr', 0) > 0.7 else 'Ambiguous'
+    print(f"T4: {combo:45s} CRFB corr {corr_str}  between p={res['between_p']:.4f}  {supports}")
 
 # Test 5: CS vs CR direction sensitivity
 for key, res in dir_sensitivity_results.items():
