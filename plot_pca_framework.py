@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 import scipy.io as sio
 from sklearn.decomposition import PCA
+from sklearn.linear_model import Ridge, RidgeCV
 from scipy.signal import savgol_filter
 from scipy.spatial import procrustes as scipy_procrustes
 import plotly.graph_objects as go
@@ -401,6 +402,48 @@ def compute_trajectory_metrics(smooth_data, window_data, dt=0.01):
         'peak_separation': float(np.max(separation)),
         'post_event_mean_separation': post_event_mean_sep,
         'plot_time': plot_time,
+    }
+
+
+def compute_separation_index(sep_timecourse, pre_slice, post_slice):
+    """Compute normalized separation metrics for fwd-bwd divergence.
+
+    Args:
+        sep_timecourse: 1D array of fwd-bwd Euclidean distances over time.
+        pre_slice: slice for pre-event baseline period.
+        post_slice: slice for post-event period.
+
+    Returns:
+        dict with:
+            fold_change: post_mean / pre_mean (>1 = increased separation)
+            cohens_d: (post_mean - pre_mean) / pre_std
+            divergence_onset: first index in full timecourse where sep exceeds
+                              pre_mean + 2*pre_std (None if never exceeded)
+            auc_above_baseline: sum of (post_sep - pre_mean) where positive
+    """
+    pre = sep_timecourse[pre_slice]
+    post = sep_timecourse[post_slice]
+    pre_mean = float(np.mean(pre))
+    pre_std = float(np.std(pre))
+    post_mean = float(np.mean(post))
+
+    fold_change = post_mean / pre_mean if pre_mean > 0 else np.nan
+    cohens_d = (post_mean - pre_mean) / pre_std if pre_std > 0 else np.nan
+
+    # Divergence onset: first timepoint exceeding threshold
+    threshold = pre_mean + 2 * pre_std
+    above = np.where(sep_timecourse > threshold)[0]
+    divergence_onset = int(above[0]) if len(above) > 0 else None
+
+    # AUC above baseline in post window
+    excess = np.maximum(post - pre_mean, 0)
+    auc_above = float(np.sum(excess))
+
+    return {
+        'fold_change': fold_change,
+        'cohens_d': cohens_d,
+        'divergence_onset': divergence_onset,
+        'auc_above_baseline': auc_above,
     }
 
 
@@ -2084,13 +2127,15 @@ def cross_class_project(result_a, result_b, window=150, event_idx=600, dt=0.01,
     # Class A PC time-courses: (n_comp × 2T) — use mean-corrected projection
     Z_a = pca_a.components_ @ (X_a_arr - pca_a.mean_[:, np.newaxis])
 
-    # ---- Full-data (training) fit ----
-    # Least-squares with intercept: [X_b.T | 1] @ [W; b] ≈ Z_a.T
-    # The intercept absorbs any mean offset between populations.
-    X_b_aug = np.column_stack([X_b_arr.T, np.ones(X_b_arr.shape[1])])
-    W_aug, _, _, _ = np.linalg.lstsq(X_b_aug, Z_a.T, rcond=None)  # (n_b+1, n_comp)
-    W = W_aug[:-1, :]          # (n_b, n_comp) mapping weights
-    b = W_aug[-1, :]           # (n_comp,)     intercept
+    # ---- Full-data (training) fit with Ridge regularization ----
+    # Ridge regression with intercept to map class B activations → class A PCs.
+    # RidgeCV auto-selects the regularization strength (alpha).
+    _alphas = np.logspace(-4, 4, 20)
+    _ridge = RidgeCV(alphas=_alphas, fit_intercept=True)
+    _ridge.fit(X_b_arr.T, Z_a.T)  # (n_time, n_b) → (n_time, n_comp)
+    best_alpha = float(_ridge.alpha_)
+    W = _ridge.coef_.T            # (n_b, n_comp) mapping weights
+    b = _ridge.intercept_         # (n_comp,)     intercept
 
     # Class B projected into class A's PC space: (n_comp × 2T)
     Z_b_in_a = (X_b_arr.T @ W + b).T
@@ -2125,10 +2170,10 @@ def cross_class_project(result_a, result_b, window=150, event_idx=600, dt=0.01,
         X_b_test   = X_b_arr[:, test_mask]
         Z_a_test   = Z_a[:, test_mask]
 
-        X_b_train_aug = np.column_stack([X_b_train.T, np.ones(X_b_train.shape[1])])
-        W_fold_aug, _, _, _ = np.linalg.lstsq(X_b_train_aug, Z_a_train.T, rcond=None)
-        W_fold = W_fold_aug[:-1, :]
-        b_fold = W_fold_aug[-1, :]
+        _ridge_fold = Ridge(alpha=best_alpha, fit_intercept=True)
+        _ridge_fold.fit(X_b_train.T, Z_a_train.T)
+        W_fold = _ridge_fold.coef_.T
+        b_fold = _ridge_fold.intercept_
         Z_pred_test = (X_b_test.T @ W_fold + b_fold).T  # (n_comp, n_test)
 
         fold_r2 = []

@@ -74,6 +74,7 @@ from plot_pca_framework import (
     cross_project,
     compute_reconstruction_r2,
     compute_trajectory_metrics,
+    compute_separation_index,
     slice_window,
     smooth_trajectories,
     build_overlay_figure,
@@ -290,7 +291,7 @@ If DA encodes movement direction, forward-selective (DF) and backward-selective 
 
 "Post-event" = timepoints after the alignment event (t >= 0), i.e., after movement onset (SpontFB/CRFB) or CS onset (ToneFB).
 
-**Null model:** Phase-randomise fwd and bwd PC timecourses independently (`_phase_randomise`), preserving autocorrelation but destroying cross-condition structure. Run once, extract window-specific null means. Null mean shown as dashed line.
+**Null model:** Joint circular shift — shift fwd AND bwd by the **same** random offset. This preserves the fwd-bwd coupling (relative separation is unchanged) but randomises the alignment to the event. Tests: "Is the post-event separation specifically time-locked to the event?" Null mean shown as dashed line.
 
 **Normalization:** Raw separation depends on PC-space scale (varies across classes due to different neuron counts). To enable cross-class comparison, separation is also shown normalized by pre-event baseline (fold-change over baseline).
 
@@ -329,20 +330,30 @@ for key, r in sorted(single_class_results.items()):
     obs_wins = {wn: float(np.mean(sep_t[ws])) for wn, ws in WIN_DEFS.items()}
     pre_baseline = obs_wins['pre_event']
 
-    # Phase-randomise ONCE, store full null timecourses
+    # ── Null 1: Joint circular shift (tests event-locking) ──
     n_t = fwd.shape[1]
     null_tc = np.empty((N_PERMS_T2, n_t))
     for i in range(N_PERMS_T2):
-        fwd_null = _phase_randomise(fwd, rng_t2)
-        bwd_null = _phase_randomise(bwd, rng_t2)
-        null_tc[i] = np.sqrt(np.sum((fwd_null - bwd_null)**2, axis=0))
+        shift = rng_t2.integers(1, n_t)
+        fwd_s = np.roll(fwd, shift, axis=1)
+        bwd_s = np.roll(bwd, shift, axis=1)
+        null_tc[i] = np.sqrt(np.sum((fwd_s - bwd_s)**2, axis=0))
 
     # Extract window-specific null distributions
     null_wins = {wn: np.mean(null_tc[:, ws], axis=1) for wn, ws in WIN_DEFS.items()}
 
+    # Per-permutation ratio: null_post[i] / null_pre[i] (proper normalized null)
+    null_pre_arr = null_wins['pre_event']  # (N_PERMS,)
+
+    # ── Null 2: Phase-randomization (tests genuine fwd-bwd structure) ──
+    obs_phase, null_phase_arr, p_phase = null_separation(
+        r['smooth_data'], r['window_data'], dt=DT,
+        n_permutations=N_PERMS_T2, seed=42)
+
     # p-value and z-score per window
     row = {'key': key, 'dataset': ds_name, 'class': cls_name,
-           'n_neurons': r['n_neurons'], 'sep_t': sep_t, 'pre_baseline': pre_baseline}
+           'n_neurons': r['n_neurons'], 'sep_t': sep_t, 'pre_baseline': pre_baseline,
+           'p_phase': p_phase}
     for wn in WIN_DEFS:
         obs_val = obs_wins[wn]
         null_arr = null_wins[wn]
@@ -351,20 +362,37 @@ for key, r in sorted(single_class_results.items()):
         zs = (obs_val - nm) / ns if ns > 0 else float('inf')
         pv = float((np.sum(null_arr >= obs_val) + 1) / (N_PERMS_T2 + 1))
         ratio = obs_val / pre_baseline if pre_baseline > 0 else np.nan
-        null_ratio = nm / pre_baseline if pre_baseline > 0 else np.nan
+
+        # Proper normalized p-value: compare obs ratio to null ratio distribution
+        if wn != 'pre_event' and pre_baseline > 0:
+            null_ratios = np.where(null_pre_arr > 0, null_arr / null_pre_arr, np.nan)
+            valid_null = null_ratios[~np.isnan(null_ratios)]
+            p_ratio = float((np.sum(valid_null >= ratio) + 1) / (len(valid_null) + 1)) if len(valid_null) > 0 else np.nan
+        else:
+            p_ratio = pv  # pre_event tests itself; fallback to raw p
+
         row[f'{wn}_sep'] = obs_val
         row[f'{wn}_null_mean'] = nm
         row[f'{wn}_z'] = zs
         row[f'{wn}_p'] = pv
+        row[f'{wn}_p_ratio'] = p_ratio
         row[f'{wn}_ratio'] = ratio
-        row[f'{wn}_null_ratio'] = null_ratio
+
+    # Separation index (effect-size metrics)
+    sep_idx = compute_separation_index(sep_t, slice(0, WINDOW), WIN_DEFS['full_post'])
+    row['cohens_d'] = sep_idx['cohens_d']
+    row['fold_change'] = sep_idx['fold_change']
+    row['divergence_onset'] = sep_idx['divergence_onset']
+    row['auc_above_baseline'] = sep_idx['auc_above_baseline']
 
     sep_results.append(row)
-    sig_fp = '***' if row['full_post_p'] < 0.001 else '**' if row['full_post_p'] < 0.01 else '*' if row['full_post_p'] < 0.05 else 'ns'
+    sig_shift = '***' if row['full_post_p'] < 0.001 else '**' if row['full_post_p'] < 0.01 else '*' if row['full_post_p'] < 0.05 else 'ns'
+    sig_phase = '***' if p_phase < 0.001 else '**' if p_phase < 0.01 else '*' if p_phase < 0.05 else 'ns'
     print(f"  {key:20s}  n={r['n_neurons']:3d}  "
           f"pre={obs_wins['pre_event']:.1f}  early={obs_wins['early_post']:.1f}  "
           f"late={obs_wins['late_post']:.1f}  rew={obs_wins['around_reward']:.1f}  "
-          f"full_post z={row['full_post_z']:.1f} {sig_fp}")
+          f"shift_p={row['full_post_p']:.3f}{sig_shift}  phase_p={p_phase:.3f}{sig_phase}  "
+          f"d={row['cohens_d']:.2f}  AUC={row['auc_above_baseline']:.1f}")
 
 # ── Plot 1: Multi-window bar chart (raw) with null mean dashed lines ──
 sep_df = pd.DataFrame(sep_results)
@@ -411,23 +439,70 @@ fig, ax = plt.subplots(figsize=(14, 5))
 bar_width = 0.25
 for i, ds in enumerate(['SpontFB', 'CRFB', 'ToneFB']):
     subset = sep_df[sep_df['dataset'] == ds]
-    positions, heights, null_ms = [], [], []
+    positions, heights, stars = [], [], []
     for j, cls in enumerate(classes_order):
         match = subset[subset['class'] == cls]
         if len(match) == 0:
             continue
         positions.append(j + (i - 1) * bar_width)
         heights.append(match.iloc[0]['full_post_ratio'])
-        null_ms.append(match.iloc[0]['full_post_null_ratio'])
+        stars.append(match.iloc[0]['full_post_p_ratio'])
     ax.bar(positions, heights, bar_width, label=ds, color=ds_colors[ds], alpha=0.8)
-    for pos, nm_val in zip(positions, null_ms):
-        ax.hlines(nm_val, pos - bar_width/2, pos + bar_width/2,
-                  colors='black', linestyles='--', linewidth=0.8, alpha=0.6)
+    for pos, h, pv in zip(positions, heights, stars):
+        if pv < 0.001:
+            ax.text(pos, h + 0.02, '***', ha='center', fontsize=8)
+        elif pv < 0.01:
+            ax.text(pos, h + 0.02, '**', ha='center', fontsize=8)
+        elif pv < 0.05:
+            ax.text(pos, h + 0.02, '*', ha='center', fontsize=8)
 ax.axhline(1.0, color='gray', ls=':', alpha=0.4, label='Baseline (1.0)')
 ax.set_xticks(range(len(classes_order)))
 ax.set_xticklabels(classes_order)
 ax.set_ylabel('Separation / pre-event baseline')
-ax.set_title('Test 2: Normalized Direction Selectivity (fold-change over baseline)')
+ax.set_title('Test 2: Normalized Direction Selectivity (ratio p-values)')
+ax.legend()
+plt.tight_layout()
+plt.show()
+
+# ── Plot 3: Cohen's d (effect size) bar chart ──
+fig, ax = plt.subplots(figsize=(14, 5))
+bar_width = 0.25
+for i, ds in enumerate(['SpontFB', 'CRFB', 'ToneFB']):
+    subset = sep_df[sep_df['dataset'] == ds]
+    positions, heights = [], []
+    for j, cls in enumerate(classes_order):
+        match = subset[subset['class'] == cls]
+        if len(match) == 0:
+            continue
+        positions.append(j + (i - 1) * bar_width)
+        heights.append(match.iloc[0]['cohens_d'])
+    ax.bar(positions, heights, bar_width, label=ds, color=ds_colors[ds], alpha=0.8)
+ax.axhline(0, color='gray', ls=':', alpha=0.4)
+ax.set_xticks(range(len(classes_order)))
+ax.set_xticklabels(classes_order)
+ax.set_ylabel("Cohen's d (post vs pre separation)")
+ax.set_title("Test 2: Separation Effect Size (Cohen's d)")
+ax.legend()
+plt.tight_layout()
+plt.show()
+
+# ── Plot 4: AUC above baseline bar chart ──
+fig, ax = plt.subplots(figsize=(14, 5))
+bar_width = 0.25
+for i, ds in enumerate(['SpontFB', 'CRFB', 'ToneFB']):
+    subset = sep_df[sep_df['dataset'] == ds]
+    positions, heights = [], []
+    for j, cls in enumerate(classes_order):
+        match = subset[subset['class'] == cls]
+        if len(match) == 0:
+            continue
+        positions.append(j + (i - 1) * bar_width)
+        heights.append(match.iloc[0]['auc_above_baseline'])
+    ax.bar(positions, heights, bar_width, label=ds, color=ds_colors[ds], alpha=0.8)
+ax.set_xticks(range(len(classes_order)))
+ax.set_xticklabels(classes_order)
+ax.set_ylabel('AUC above pre-event baseline')
+ax.set_title('Test 2: Cumulative Excess Separation (AUC above baseline)')
 ax.legend()
 plt.tight_layout()
 plt.show()
@@ -445,6 +520,14 @@ cells.append(md("""\
 - **Around-reward window:** For ToneFB, is the reward window different from late-post? If similar → reward doesn't add anything.
 - **Normalized values:** Are fold-changes comparable across classes despite different raw scales?
 - **Null mean (dashed lines):** Bars well above null mean = genuine directional structure beyond autocorrelation.
+- **Cohen's d and AUC:** Scale-invariant effect-size metrics. Cohen's d > 0.8 is a large effect. AUC captures cumulative excess separation.
+- **Phase-randomization p:** Tests whether fwd-bwd separation is due to genuine cross-condition structure (not just autocorrelation).
+
+**Why does ToneFB DA show fwd-bwd separation while SpontFB does not?** This is counterintuitive — SpontFB has free movements and should show more separation if DA purely encodes movement. Possible explanations (open question):
+- **More stereotyped movements in ToneFB:** Conditioned responses post-tone are more consistent and time-locked than spontaneous movements, making fwd-bwd more separable in trial-averaged data even if the underlying signal is the same.
+- **Context-dependent encoding:** DA may encode direction more strongly during goal-directed (post-tone) vs spontaneous contexts.
+- **Temporal structure:** ToneFB has fixed tone→delay→CR timing creating distinct states; SpontFB has variable-timing movements that average out.
+- Requires further investigation (e.g., trial-level analysis when per-trial data becomes available).
 
 ---
 """))
@@ -669,13 +752,24 @@ for combo_label in ['Dopamine', 'GABA']:
     # ToneFB: CS at WINDOW, CR movement ~100 timesteps later → reward at WINDOW+100
     # Align by extracting ±hw around each movement onset
     hw = 80  # half-width for comparison window
+    tone_center = WINDOW + 100
+    max_hw = min(hw, WINDOW, len(tone_speed) - tone_center)
     crfb_corr, crfb_p = np.nan, np.nan
     if crfb_speed is not None:
-        crfb_window = crfb_speed[WINDOW - hw : WINDOW + hw]
-        tone_window = tone_speed[WINDOW + 100 - hw : WINDOW + 100 + hw]
+        max_hw = min(max_hw, len(crfb_speed) - WINDOW)
+        crfb_window = crfb_speed[WINDOW - max_hw : WINDOW + max_hw]
+        tone_window = tone_speed[tone_center - max_hw : tone_center + max_hw]
         if len(crfb_window) == len(tone_window) and len(crfb_window) > 0:
             crfb_corr, crfb_p = pearsonr(crfb_window, tone_window)
         print(f"  CRFB-ToneFB speed correlation: r={crfb_corr:.4f}  p={crfb_p:.6f}")
+    else:
+        tone_window = tone_speed[tone_center - max_hw : tone_center + max_hw]
+
+    # Percentile rank: where does reward-time speed fall among post-event speeds?
+    reward_speed = wt['observed_speed']
+    post_speeds = tone_speed[WINDOW:]
+    pctile = float(np.mean(post_speeds <= reward_speed)) * 100
+    print(f"  Reward-time speed percentile (among post-event): {pctile:.1f}%")
 
     speed_comparison_results[combo_label] = {
         'within_p': wt['p_value'], 'between_p': bt['p_value'],
@@ -700,15 +794,15 @@ for combo_label in ['Dopamine', 'GABA']:
 
     # Speed overlay: CRFB (aligned to movement) vs ToneFB (shifted to align movement)
     ax = axes[2]
-    t_overlay = (np.arange(2 * hw) - hw) * DT  # time relative to movement onset
-    if crfb_speed is not None and len(crfb_window) == 2 * hw:
+    t_overlay = (np.arange(2 * max_hw) - max_hw) * DT  # time relative to movement onset
+    if crfb_speed is not None and len(crfb_window) == 2 * max_hw:
         ax.plot(t_overlay, crfb_window, color='coral', linewidth=1.5,
                 label='CRFB (at movement)')
-    if len(tone_window) == 2 * hw:
+    if len(tone_window) == 2 * max_hw:
         ax.plot(t_overlay, tone_window, color='seagreen', linewidth=1.5,
                 label='ToneFB (at reward=movement)')
-    spont_window = spont_speed[WINDOW - hw : WINDOW + hw]
-    if len(spont_window) == 2 * hw:
+    spont_window = spont_speed[WINDOW - max_hw : WINDOW + max_hw]
+    if len(spont_window) == 2 * max_hw:
         ax.plot(t_overlay, spont_window, color='steelblue', linewidth=1.5,
                 alpha=0.6, label='SpontFB (at movement)')
     ax.axvline(0, color='gray', ls='--', alpha=0.5)
@@ -799,16 +893,13 @@ for key, r in test_keys:
     cs_ratio = cs_sep / pre_baseline_t5 if pre_baseline_t5 > 0 else np.nan
     late_ratio = late_sep / pre_baseline_t5 if pre_baseline_t5 > 0 else np.nan
 
-    # Permutation: circularly shift fwd and bwd independently
-    n_t = fwd.shape[1]
+    # Null: phase-randomize the separation timecourse itself.
+    # Preserves power spectrum / autocorrelation but destroys specific temporal
+    # structure (where peaks fall). Tests whether Late > CS is event-specific.
     null_diffs = np.empty(1000)
     for i in range(1000):
-        shift_f = rng.integers(1, n_t)
-        shift_b = rng.integers(1, n_t)
-        fwd_s = np.roll(fwd, shift_f, axis=1)
-        bwd_s = np.roll(bwd, shift_b, axis=1)
-        sep_s = np.sqrt(np.sum((fwd_s - bwd_s)**2, axis=0))
-        null_diffs[i] = float(np.mean(sep_s[LATE_SLICE]) - np.mean(sep_s[CS_SLICE]))
+        sep_null = _phase_randomise(sep_t[np.newaxis, :], rng)[0]
+        null_diffs[i] = float(np.mean(sep_null[LATE_SLICE]) - np.mean(sep_null[CS_SLICE]))
 
     p = float((np.sum(np.abs(null_diffs) >= np.abs(obs_diff)) + 1) / 1001)
     z = (obs_diff - np.mean(null_diffs)) / np.std(null_diffs) if np.std(null_diffs) > 0 else 0
@@ -923,6 +1014,8 @@ for combo_label, groups in [('Dopamine', DA_GROUPS), ('GABA', GABA_GROUPS)]:
     data_spont = results[spont_key]['data']
     data_tone = results[tone_key]['data']
     X_spont, X_tone, n_dropped = _align_neuron_data(data_spont, data_tone, groups)
+    X_spont = X_spont.values if hasattr(X_spont, 'values') else np.asarray(X_spont)
+    X_tone = X_tone.values if hasattr(X_tone, 'values') else np.asarray(X_tone)
     n_t = X_spont.shape[1] // 2
     n_neurons = X_spont.shape[0]
 
@@ -1019,11 +1112,11 @@ for label, res in cross_proj_results.items():
     supports = 'Movement' if res['r2'] > 0.70 and res['p'] < 0.05 else 'Ambiguous'
     print(f"T1: {label:45s} R2={res['r2']:.3f}  p={res['p']:.4f}  {supports}")
 
-# Test 2: Per-class separation (summary)
+# Test 2: Per-class separation (summary — full_post window)
 for row in sep_results:
     if row['class'] in ['DF', 'DB', 'GF', 'GB']:
-        supports = 'Movement' if row['p'] < 0.05 else 'No signal'
-        print(f"T2: {row['key']:45s} sep={row['separation']:.2f}  p={row['p']:.4f}  {supports}")
+        supports = 'Movement' if row['full_post_p'] < 0.05 else 'No signal'
+        print(f"T2: {row['key']:45s} sep={row['full_post_sep']:.2f}  p={row['full_post_p']:.4f}  {supports}")
 
 # Test 3: GF/GB reward insensitivity (3 metrics)
 for key, res in reward_insensitivity_results.items():
