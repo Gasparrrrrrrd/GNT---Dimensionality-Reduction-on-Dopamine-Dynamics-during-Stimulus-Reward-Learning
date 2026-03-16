@@ -333,12 +333,15 @@ def compute_trajectory_metrics(smooth_data, window_data, dt=0.01):
         bwd_curvature: (n_plot-2,)
         fwd_arc_length: float
         bwd_arc_length: float
-        separation: (n_plot,) fwd-bwd Euclidean distance
+        separation: (n_plot,) fwd-bwd Euclidean distance (smoothed)
         mean_separation: float — mean over ALL timepoints (includes pre-event)
         peak_separation: float — maximum separation across all timepoints
         post_event_mean_separation: float — mean separation strictly after
             t=0 (event onset), the scientifically relevant window for testing
             whether the two conditions diverge post-stimulus.
+        raw_separation: (n_plot,) fwd-bwd Euclidean distance (unsmoothed)
+        raw_mean_separation: float
+        raw_post_event_mean_separation: float
         plot_time: time axis from window_data
     """
     fwd = smooth_data['fwd_smooth']  # (n_comp, n_plot)
@@ -390,6 +393,13 @@ def compute_trajectory_metrics(smooth_data, window_data, dt=0.01):
     post_sep = separation[post_event_mask]
     post_event_mean_sep = float(np.mean(post_sep)) if post_sep.size > 0 else float(np.mean(separation))
 
+    # Raw (unsmoothed) separation from window_data
+    fwd_raw = window_data['fwd']  # (n_comp, n_plot)
+    bwd_raw = window_data['bwd']
+    raw_separation = np.sqrt(np.sum((fwd_raw - bwd_raw)**2, axis=0))
+    raw_post_sep = raw_separation[post_event_mask]
+    raw_post_event_mean_sep = float(np.mean(raw_post_sep)) if raw_post_sep.size > 0 else float(np.mean(raw_separation))
+
     return {
         'fwd_speed': fwd_speed,
         'bwd_speed': bwd_speed,
@@ -401,6 +411,9 @@ def compute_trajectory_metrics(smooth_data, window_data, dt=0.01):
         'mean_separation': float(np.mean(separation)),
         'peak_separation': float(np.max(separation)),
         'post_event_mean_separation': post_event_mean_sep,
+        'raw_separation': raw_separation,
+        'raw_mean_separation': float(np.mean(raw_separation)),
+        'raw_post_event_mean_separation': raw_post_event_mean_sep,
         'plot_time': plot_time,
     }
 
@@ -445,6 +458,388 @@ def compute_separation_index(sep_timecourse, pre_slice, post_slice):
         'divergence_onset': divergence_onset,
         'auc_above_baseline': auc_above,
     }
+
+
+def compute_per_pc_separation(smooth_data, window_data):
+    """Decompose fwd-bwd separation by principal component.
+
+    For each PC, computes the 1D absolute difference |fwd[k]-bwd[k]|
+    and the fractional contribution to total squared separation.
+    Comparing fractional_contribution against EVR reveals which PCs
+    disproportionately encode movement direction.
+
+    Args:
+        smooth_data: dict with 'fwd_smooth', 'bwd_smooth' (n_comp, n_plot)
+        window_data: dict with 'plot_time'
+
+    Returns dict with:
+        per_pc_sep: (n_comp, n_plot) — |fwd[k] - bwd[k]| per PC
+        per_pc_mean: (n_comp,) — time-averaged per-PC separation
+        cumulative_sep: (n_comp, n_plot) — sqrt(sum_{j=0}^{k} diff_j^2)
+        fractional_contribution: (n_comp,) — fraction of total squared
+            separation attributable to each PC (sums to 1.0)
+        total_sep: (n_plot,) — full separation (all PCs)
+        plot_time: array
+    """
+    fwd = smooth_data['fwd_smooth']
+    bwd = smooth_data['bwd_smooth']
+    n_comp, n_plot = fwd.shape
+    plot_time = window_data['plot_time']
+
+    diff_sq = (fwd - bwd) ** 2  # (n_comp, n_plot)
+    per_pc_sep = np.abs(fwd - bwd)  # (n_comp, n_plot)
+    per_pc_mean = np.mean(per_pc_sep, axis=1)  # (n_comp,)
+
+    # Cumulative separation: using PCs 0..k
+    cumulative_sep = np.zeros((n_comp, n_plot))
+    running_sum = np.zeros(n_plot)
+    for k in range(n_comp):
+        running_sum = running_sum + diff_sq[k]
+        cumulative_sep[k] = np.sqrt(running_sum)
+
+    total_sep = cumulative_sep[-1]  # same as full Euclidean separation
+
+    # Fractional contribution: each PC's share of total squared separation
+    total_sq_mean = np.mean(np.sum(diff_sq, axis=0))
+    if total_sq_mean > 0:
+        fractional_contribution = np.mean(diff_sq, axis=1) / total_sq_mean
+    else:
+        fractional_contribution = np.zeros(n_comp)
+
+    return {
+        'per_pc_sep': per_pc_sep,
+        'per_pc_mean': per_pc_mean,
+        'cumulative_sep': cumulative_sep,
+        'fractional_contribution': fractional_contribution,
+        'total_sep': total_sep,
+        'plot_time': plot_time,
+    }
+
+
+def plot_per_pc_separation(sep_dict, evr=None, title="Per-PC Separation Decomposition"):
+    """Plot per-PC separation decomposition with optional EVR comparison.
+
+    Two subplots:
+    1. Per-PC separation timecourses (overlaid lines)
+    2. Bar chart: fractional contribution per PC vs EVR per PC
+
+    Args:
+        sep_dict: output of compute_per_pc_separation()
+        evr: array of explained variance ratios (optional overlay)
+        title: str
+
+    Returns: matplotlib Figure
+    """
+    per_pc_sep = sep_dict['per_pc_sep']
+    frac = sep_dict['fractional_contribution']
+    plot_time = sep_dict['plot_time']
+    n_comp = per_pc_sep.shape[0]
+    pc_labels = [f'PC{k+1}' for k in range(n_comp)]
+    colors = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red', 'tab:purple']
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    # Subplot 1: per-PC separation timecourses
+    ax1 = axes[0]
+    for k in range(n_comp):
+        ax1.plot(plot_time, per_pc_sep[k], label=pc_labels[k],
+                 color=colors[k % len(colors)], linewidth=1.5)
+    ax1.axvline(0, color='gray', linestyle='--', alpha=0.5)
+    ax1.set_xlabel('Time (s)')
+    ax1.set_ylabel('|fwd - bwd| (per PC)')
+    ax1.set_title('Per-PC Separation Over Time')
+    ax1.legend()
+
+    # Subplot 2: fractional contribution vs EVR
+    ax2 = axes[1]
+    x = np.arange(n_comp)
+    width = 0.35
+    ax2.bar(x - width/2, frac, width, label='Sep. fraction',
+            color='steelblue')
+    if evr is not None:
+        evr_arr = np.asarray(evr)[:n_comp]
+        ax2.bar(x + width/2, evr_arr, width, label='EVR',
+                color='coral')
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(pc_labels)
+    ax2.set_ylabel('Fraction')
+    ax2.set_title('Separation Contribution vs Explained Variance')
+    ax2.legend()
+
+    fig.suptitle(title, fontsize=13)
+    fig.tight_layout()
+    return fig
+
+
+def compute_velocity_metrics(smooth_data, window_data, dt=0.01, use_raw=False):
+    """Compute velocity-based comparison between fwd and bwd trajectories.
+
+    Cosine similarity of velocity vectors reveals whether trajectories
+    move in the same direction (+1), opposite (-1), or orthogonal (0)
+    at each timepoint.
+
+    Args:
+        smooth_data: dict with 'fwd_smooth', 'bwd_smooth'
+        window_data: dict with 'fwd', 'bwd', 'plot_time'
+        dt: float — timestep in seconds
+        use_raw: bool — if True, compute from unsmoothed window_data
+            instead of smooth_data. Noisier but avoids smoothing artifacts.
+
+    Returns dict with:
+        fwd_velocity: (n_comp, n_plot-1) — velocity vectors
+        bwd_velocity: (n_comp, n_plot-1)
+        cosine_similarity: (n_plot-1,) — cos(angle) between velocity vectors
+        angle_degrees: (n_plot-1,) — angle in degrees
+        speed_ratio: (n_plot-1,) — |v_fwd| / |v_bwd|
+        speed_diff: (n_plot-1,) — |v_fwd| - |v_bwd|
+        velocity_time: (n_plot-1,) — midpoint time axis
+        use_raw: bool — whether raw data was used
+    """
+    if use_raw:
+        fwd = window_data['fwd']
+        bwd = window_data['bwd']
+    else:
+        fwd = smooth_data['fwd_smooth']
+        bwd = smooth_data['bwd_smooth']
+    plot_time = window_data['plot_time']
+
+    v_fwd = np.diff(fwd, axis=1) / dt
+    v_bwd = np.diff(bwd, axis=1) / dt
+
+    # Speed magnitudes
+    speed_fwd = np.sqrt(np.sum(v_fwd**2, axis=0))
+    speed_bwd = np.sqrt(np.sum(v_bwd**2, axis=0))
+
+    # Cosine similarity at each timepoint
+    dot_prod = np.sum(v_fwd * v_bwd, axis=0)
+    denom = np.maximum(speed_fwd * speed_bwd, 1e-12)
+    cos_sim = dot_prod / denom
+
+    # Clamp for numerical safety before arccos
+    cos_clamped = np.clip(cos_sim, -1.0, 1.0)
+    angle_deg = np.degrees(np.arccos(cos_clamped))
+
+    # Speed ratio and difference
+    speed_ratio = speed_fwd / np.maximum(speed_bwd, 1e-12)
+    speed_diff = speed_fwd - speed_bwd
+
+    # Midpoint time axis for velocity (between consecutive timepoints)
+    vel_time = (plot_time[:-1] + plot_time[1:]) / 2
+
+    return {
+        'fwd_velocity': v_fwd,
+        'bwd_velocity': v_bwd,
+        'cosine_similarity': cos_sim,
+        'angle_degrees': angle_deg,
+        'speed_ratio': speed_ratio,
+        'speed_diff': speed_diff,
+        'velocity_time': vel_time,
+        'use_raw': use_raw,
+    }
+
+
+def plot_velocity_comparison(vel_metrics, event_markers=None,
+                              title="Velocity Comparison", window=150):
+    """Plot cosine similarity and speed profiles over time.
+
+    Two subplots:
+    1. Cosine similarity timecourse with reference lines at 0, +1, -1
+    2. Speed profiles (fwd vs bwd)
+
+    Args:
+        vel_metrics: output of compute_velocity_metrics()
+        event_markers: list of marker dicts (optional, for vertical lines)
+        title: str
+        window: int — window size for event marker index conversion
+
+    Returns: matplotlib Figure
+    """
+    vel_time = vel_metrics['velocity_time']
+    cos_sim = vel_metrics['cosine_similarity']
+    speed_fwd = np.sqrt(np.sum(vel_metrics['fwd_velocity']**2, axis=0))
+    speed_bwd = np.sqrt(np.sum(vel_metrics['bwd_velocity']**2, axis=0))
+
+    fig, axes = plt.subplots(2, 1, figsize=(12, 7), sharex=True)
+
+    # Subplot 1: cosine similarity
+    ax1 = axes[0]
+    ax1.plot(vel_time, cos_sim, color='purple', linewidth=1.5)
+    ax1.axhline(0, color='gray', linestyle='-', alpha=0.3)
+    ax1.axhline(1, color='green', linestyle='--', alpha=0.3, label='Same dir.')
+    ax1.axhline(-1, color='red', linestyle='--', alpha=0.3, label='Opposite')
+    ax1.axvline(0, color='gray', linestyle='--', alpha=0.5)
+    ax1.set_ylabel('Cosine Similarity')
+    ax1.set_title('Velocity Direction: Fwd vs Bwd')
+    ax1.legend(loc='upper right')
+    ax1.set_ylim(-1.2, 1.2)
+
+    # Subplot 2: speed profiles
+    ax2 = axes[1]
+    ax2.plot(vel_time, speed_fwd, color='orangered', linewidth=1.5, label='Fwd')
+    ax2.plot(vel_time, speed_bwd, color='royalblue', linewidth=1.5, label='Bwd')
+    ax2.axvline(0, color='gray', linestyle='--', alpha=0.5)
+    ax2.set_xlabel('Time (s)')
+    ax2.set_ylabel('Speed (PC units/s)')
+    ax2.set_title('Speed Profiles')
+    ax2.legend()
+
+    # Add event marker lines
+    if event_markers:
+        dt = vel_time[1] - vel_time[0] if len(vel_time) > 1 else 0.01
+        for marker in event_markers:
+            t_event = (marker['idx'] - window) * abs(dt)
+            for ax in axes:
+                ax.axvline(t_event, color=marker['color'],
+                           linestyle=':', alpha=0.6, linewidth=1.5)
+            axes[0].text(t_event, 1.1, marker['label'],
+                         color=marker['color'], fontsize=8,
+                         ha='center', va='bottom')
+
+    fig.suptitle(title, fontsize=13)
+    fig.tight_layout()
+    return fig
+
+
+def compute_windowed_displacement_cosine(smooth_data, window_data, step=15, dt=0.01):
+    """Cosine similarity using displacement vectors over a larger window.
+
+    Instead of instantaneous velocity (np.diff, 1 timestep = 10ms),
+    compute displacement over *step* timesteps (~150ms at step=15).
+    This averages out noise and gives a biologically meaningful timescale.
+
+    Args:
+        smooth_data: dict with 'fwd_smooth', 'bwd_smooth' (n_comp, n_plot)
+        window_data: dict with 'plot_time'
+        step: int — displacement window in timesteps (default 15 = 150ms)
+        dt: float — timestep in seconds
+
+    Returns dict with:
+        windowed_cosine: (n_plot - step,) — cosine similarity timecourse
+        windowed_time: (n_plot - step,) — midpoint time axis
+        step: int — step used
+    """
+    fwd = smooth_data['fwd_smooth']
+    bwd = smooth_data['bwd_smooth']
+    plot_time = window_data['plot_time']
+
+    disp_fwd = (fwd[:, step:] - fwd[:, :-step]) / (step * dt)
+    disp_bwd = (bwd[:, step:] - bwd[:, :-step]) / (step * dt)
+
+    speed_fwd = np.sqrt(np.sum(disp_fwd**2, axis=0))
+    speed_bwd = np.sqrt(np.sum(disp_bwd**2, axis=0))
+    dot_prod = np.sum(disp_fwd * disp_bwd, axis=0)
+    denom = np.maximum(speed_fwd * speed_bwd, 1e-12)
+    cos_sim = dot_prod / denom
+
+    # Time axis: midpoint between start and end of each displacement window
+    mid_time = (plot_time[:-step] + plot_time[step:]) / 2
+
+    return {
+        'windowed_cosine': cos_sim,
+        'windowed_time': mid_time,
+        'step': step,
+    }
+
+
+def compute_pc_windowed_correlation(smooth_data, window_data, win=50):
+    """Sliding-window Pearson correlation of fwd vs bwd per PC.
+
+    Position-based metric (no differentiation) — immune to velocity noise.
+    +1 = parallel trajectories, -1 = anti-parallel.
+
+    Args:
+        smooth_data: dict with 'fwd_smooth', 'bwd_smooth' (n_comp, n_plot)
+        window_data: dict with 'plot_time'
+        win: int — sliding window size in timesteps (default 50 = 500ms)
+
+    Returns dict with:
+        per_pc_corr: (n_comp, n_plot - win + 1) — per-PC correlation timecourse
+        mean_corr: (n_plot - win + 1,) — mean across PCs
+        corr_time: (n_plot - win + 1,) — center-of-window time axis
+    """
+    fwd = smooth_data['fwd_smooth']
+    bwd = smooth_data['bwd_smooth']
+    plot_time = window_data['plot_time']
+    n_comp, n_plot = fwd.shape
+    n_out = n_plot - win + 1
+
+    per_pc_corr = np.zeros((n_comp, n_out))
+    for t in range(n_out):
+        for k in range(n_comp):
+            f_win = fwd[k, t:t + win]
+            b_win = bwd[k, t:t + win]
+            f_std = np.std(f_win)
+            b_std = np.std(b_win)
+            if f_std > 1e-12 and b_std > 1e-12:
+                per_pc_corr[k, t] = float(np.corrcoef(f_win, b_win)[0, 1])
+            else:
+                per_pc_corr[k, t] = 0.0
+
+    mean_corr = np.mean(per_pc_corr, axis=0)
+    corr_time = plot_time[win // 2: win // 2 + n_out]
+
+    return {
+        'per_pc_corr': per_pc_corr,
+        'mean_corr': mean_corr,
+        'corr_time': corr_time,
+        'win': win,
+    }
+
+
+def _cv_r2_pca(X, n_components, n_folds=5):
+    """k-fold CV R² for PCA reconstruction.
+
+    Splits the time axis into *n_folds* contiguous blocks.  Forward and
+    backward halves are split symmetrically so that fwd/bwd pairing is
+    preserved within each fold.
+
+    For each fold the PCA is refit on the training timepoints and
+    reconstruction R² is evaluated on the held-out timepoints.
+
+    Args:
+        X: (n_neurons, 2*timesteps) — full concatenated time series.
+        n_components: int — number of PCs to fit.
+        n_folds: int — number of contiguous folds (default 5).
+
+    Returns:
+        cv_r2: float — mean CV R² across folds.
+        fold_r2s: list[float] — per-fold R² values.
+    """
+    X_arr = X.values if hasattr(X, 'values') else np.asarray(X)
+    n_neurons, total_time = X_arr.shape
+    half = total_time // 2  # length of each direction half
+
+    fold_r2s = []
+    fold_size = half // n_folds
+
+    for i in range(n_folds):
+        start = i * fold_size
+        end = half if (i == n_folds - 1) else (i + 1) * fold_size
+
+        # Test indices: corresponding slice in both halves
+        test_idx = np.concatenate([
+            np.arange(start, end),
+            np.arange(half + start, half + end),
+        ])
+        train_idx = np.setdiff1d(np.arange(total_time), test_idx)
+
+        X_train = X_arr[:, train_idx]
+        X_test = X_arr[:, test_idx]
+
+        n_comp = min(n_components, X_train.shape[0], X_train.shape[1])
+        pca_fold = PCA(n_components=n_comp)
+        pca_fold.fit(X_train.T)
+
+        # Reconstruct test data using training PCA basis
+        X_test_c = X_test - pca_fold.mean_[:, np.newaxis]
+        scores = pca_fold.components_ @ X_test_c
+        X_rec = pca_fold.components_.T @ scores
+
+        ss_res = np.sum((X_test_c - X_rec) ** 2)
+        ss_tot = np.sum(X_test_c ** 2)
+        fold_r2s.append(float(1.0 - ss_res / (ss_tot + 1e-12)))
+
+    return float(np.mean(fold_r2s)), fold_r2s
 
 
 def compute_reconstruction_r2(pca, X):
@@ -936,7 +1331,7 @@ def compute_procrustes_comparison(smooth_data_a, smooth_data_b,
 # ===========================================================================
 
 def null_cross_projection_r2(data_fit, data_project, neuron_groups,
-                              n_components=3, n_permutations=500,
+                              n_components=3, n_permutations=20,
                               seed=42):
     """Null distribution for group-averaged cross-projection R².
 
@@ -945,6 +1340,9 @@ def null_cross_projection_r2(data_fit, data_project, neuron_groups,
     distribution by independently phase-randomising each group's
     time-course (preserving autocorrelation and power spectrum) in the
     *project* dataset before projecting onto the fit PCA basis.
+
+    Default 20 permutations for fast exploration.  Use 200+ for
+    publication-quality p-values.
 
     Args:
         data_fit:  raw data dict for the fitting dataset.
@@ -982,13 +1380,16 @@ def null_cross_projection_r2(data_fit, data_project, neuron_groups,
 
 
 def null_separation(smooth_data, window_data, dt=0.01,
-                    n_permutations=500, seed=42):
+                    n_permutations=20, seed=42):
     """Null distribution for fwd-bwd trajectory separation.
 
     Phase-randomises each PC's projected time-course independently for
     both forward and backward, then recomputes post-event mean
     separation.  This preserves the autocorrelation and power spectrum
     of each PC while destroying the cross-condition structure.
+
+    Default 20 permutations for fast exploration.  Use 200+ for
+    publication-quality p-values.
 
     Args:
         smooth_data: dict with 'fwd_smooth', 'bwd_smooth'.
@@ -1025,7 +1426,7 @@ def null_separation(smooth_data, window_data, dt=0.01,
     return observed_sep, null_seps, p_value
 
 
-def null_cross_class_r2(result_a, result_b, n_permutations=200,
+def null_cross_class_r2(result_a, result_b, n_permutations=20,
                          n_folds=5, seed=42):
     """Null distribution for cross-class projection R².
 
@@ -1033,6 +1434,9 @@ def null_cross_class_r2(result_a, result_b, n_permutations=200,
     the total pool fixed) before fitting the lstsq mapping, then
     computes CV R².  This tests whether the observed cross-class
     mapping captures genuine shared structure vs. fitting noise.
+
+    Default 20 permutations for fast exploration.  Use 200+ for
+    publication-quality p-values.
 
     Args:
         result_a: analyze_dataset output for class A (reference).
@@ -1112,8 +1516,11 @@ def _cv_r2_lstsq(X_b, Z_a, n_folds):
 
 
 def null_same_neuron_cross_r2(result_fit, result_project, n_components=3,
-                               n_permutations=500, seed=42):
+                               n_permutations=20, seed=42):
     """Null distribution for same-neuron cross-projection R².
+
+    Default 20 permutations for fast exploration.  Use 200+ for
+    publication-quality p-values.
 
     For datasets that share the same neurons (e.g. CRFB and ToneFB),
     tests whether the observed cross-projection R² reflects genuine
@@ -1177,8 +1584,11 @@ def null_reward_deflection(smooth_data_task, window_data_task,
                             smooth_data_ctrl, window_data_ctrl,
                             reward_offset=100, dt=0.01,
                             test_half_width=10,
-                            n_permutations=1000, seed=42):
+                            n_permutations=20, seed=42):
     """Null model for reward-time trajectory deflection.
+
+    Default 20 permutations for fast exploration.  Use 200+ for
+    publication-quality p-values.
 
     Tests whether the trajectory speed at reward delivery time is
     significantly higher than expected by chance, and whether it
@@ -1339,9 +1749,12 @@ def _phase_randomise(X, rng):
     return X_out
 
 
-def null_rsa(X_a, X_b, n_permutations=500, seed=42,
+def null_rsa(X_a, X_b, n_permutations=20, seed=42,
              metric='correlation', method='corr'):
     """Null model for RSA: phase-randomise both populations independently.
+
+    Default 20 permutations for fast exploration.  Use 200+ for
+    publication-quality p-values.
 
     Destroys cross-neuron temporal alignment while preserving each neuron's
     autocorrelation and power spectrum.  Builds a null distribution of RDM
@@ -1706,16 +2119,178 @@ def build_overlay_figure(trajectory_sets, title, width=1200, height=900):
             line=dict(color=tset['bwd_color'], width=5, dash=dash),
         ))
 
-        # Event markers
+        # Event markers (on both fwd and bwd trajectories)
+        seen_labels = set()
         for marker in tset.get('event_markers', []):
             idx = marker['idx']
+            mlabel = marker['label']
+            show = mlabel not in seen_labels
+            seen_labels.add(mlabel)
             if idx < fwd.shape[1]:
                 fig.add_trace(endpoint_trace(
                     fwd[0][idx], fwd[1][idx], fwd[2][idx],
-                    color=marker['color'], name=f"{label} {marker['label']}",
+                    color=marker['color'], name=f"{label} {mlabel}",
                     symbol=marker.get('symbol', 'diamond'),
                     size=marker.get('size', 10),
+                    showlegend=show,
                 ))
+            if idx < bwd.shape[1]:
+                fig.add_trace(endpoint_trace(
+                    bwd[0][idx], bwd[1][idx], bwd[2][idx],
+                    color=marker['color'], name=f"{label} {mlabel}",
+                    symbol=marker.get('symbol', 'diamond'),
+                    size=marker.get('size', 10),
+                    showlegend=False,
+                ))
+
+    fig.update_layout(
+        title=dict(text=title, y=0.95, x=0.5, xanchor='center'),
+        scene=dict(
+            xaxis=dict(title="PC1", **SCENE_AXES),
+            yaxis=dict(title="PC2", **SCENE_AXES),
+            zaxis=dict(title="PC3", **SCENE_AXES),
+        ),
+        font=dict(family="Times New Roman, serif", size=12, color="black"),
+        margin=dict(l=80, r=220, t=80, b=80),
+        paper_bgcolor="white", plot_bgcolor="white",
+        legend=dict(orientation="v", x=1.05, y=0.5),
+        width=width, height=height,
+    )
+    return fig
+
+
+# ===========================================================================
+# Visualization: separation diagnostic
+# ===========================================================================
+
+def compute_separation_comparison(window_data, smooth_data, dt=0.01):
+    """Compare raw vs smoothed fwd-bwd separation.
+
+    Args:
+        window_data: dict with 'fwd', 'bwd', 'plot_time'
+        smooth_data: dict with 'fwd_smooth', 'bwd_smooth'
+
+    Returns dict with:
+        raw_separation: (n_plot,) from unsmoothed projections
+        smooth_separation: (n_plot,) from Savitzky-Golay smoothed
+        raw_mean: float
+        smooth_mean: float
+        correlation: float — Pearson r between raw and smooth separation
+        plot_time: array
+    """
+    fwd_raw = window_data['fwd']
+    bwd_raw = window_data['bwd']
+    fwd_sm = smooth_data['fwd_smooth']
+    bwd_sm = smooth_data['bwd_smooth']
+    plot_time = window_data['plot_time']
+
+    raw_sep = np.sqrt(np.sum((fwd_raw - bwd_raw)**2, axis=0))
+    sm_sep = np.sqrt(np.sum((fwd_sm - bwd_sm)**2, axis=0))
+
+    corr = float(np.corrcoef(raw_sep, sm_sep)[0, 1])
+
+    return {
+        'raw_separation': raw_sep,
+        'smooth_separation': sm_sep,
+        'raw_mean': float(np.mean(raw_sep)),
+        'smooth_mean': float(np.mean(sm_sep)),
+        'correlation': corr,
+        'plot_time': plot_time,
+    }
+
+
+def plot_separation_diagnostic(window_data, smooth_data, event_markers,
+                                title="Separation Diagnostic",
+                                n_lines=20, width=1200, height=900):
+    """3D plot with distance lines between corresponding fwd/bwd timepoints.
+
+    Draws smoothed fwd/bwd trajectories with thin lines connecting
+    fwd[:,t] to bwd[:,t] at evenly-spaced timepoints, color-coded by
+    separation magnitude (green=small, red=large).  Raw scatter points
+    are shown semi-transparently for comparison.
+
+    Args:
+        window_data: dict from slice_window (raw projections)
+        smooth_data: dict from smooth_trajectories
+        event_markers: list of marker dicts
+        title: str
+        n_lines: number of connection lines to draw (evenly spaced)
+        width, height: figure dimensions
+
+    Returns: plotly Figure
+    """
+    fwd_sm = smooth_data['fwd_smooth']
+    bwd_sm = smooth_data['bwd_smooth']
+    fwd_raw = window_data['fwd']
+    bwd_raw = window_data['bwd']
+    n_plot = fwd_sm.shape[1]
+
+    fig = go.Figure()
+
+    # Raw scatter (semi-transparent)
+    fig.add_trace(go.Scatter3d(
+        x=fwd_raw[0], y=fwd_raw[1], z=fwd_raw[2],
+        mode='markers', name='Fwd raw',
+        marker=dict(size=2, color='orangered', opacity=0.3),
+    ))
+    fig.add_trace(go.Scatter3d(
+        x=bwd_raw[0], y=bwd_raw[1], z=bwd_raw[2],
+        mode='markers', name='Bwd raw',
+        marker=dict(size=2, color='royalblue', opacity=0.3),
+    ))
+
+    # Smoothed trajectories
+    fig.add_trace(go.Scatter3d(
+        x=fwd_sm[0], y=fwd_sm[1], z=fwd_sm[2],
+        mode='lines', name='Fwd smooth',
+        line=dict(color='orangered', width=5),
+    ))
+    fig.add_trace(go.Scatter3d(
+        x=bwd_sm[0], y=bwd_sm[1], z=bwd_sm[2],
+        mode='lines', name='Bwd smooth',
+        line=dict(color='royalblue', width=5),
+    ))
+
+    # Distance lines at evenly spaced timepoints
+    sep = np.sqrt(np.sum((fwd_sm - bwd_sm)**2, axis=0))
+    sep_min, sep_max = float(np.min(sep)), float(np.max(sep))
+    sep_range = max(sep_max - sep_min, 1e-12)
+
+    indices = np.linspace(0, n_plot - 1, n_lines, dtype=int)
+    for idx in indices:
+        frac = (sep[idx] - sep_min) / sep_range  # 0=green, 1=red
+        r = int(255 * frac)
+        g = int(255 * (1 - frac))
+        color = f'rgb({r},{g},0)'
+        fig.add_trace(go.Scatter3d(
+            x=[fwd_sm[0][idx], bwd_sm[0][idx]],
+            y=[fwd_sm[1][idx], bwd_sm[1][idx]],
+            z=[fwd_sm[2][idx], bwd_sm[2][idx]],
+            mode='lines+text',
+            line=dict(color=color, width=3),
+            text=[f'{sep[idx]:.3f}', ''],
+            textposition='top center',
+            textfont=dict(size=8, color=color),
+            showlegend=False,
+        ))
+
+    # Event markers on both trajectories
+    for marker in event_markers:
+        midx = marker['idx']
+        if midx < n_plot:
+            fig.add_trace(endpoint_trace(
+                fwd_sm[0][midx], fwd_sm[1][midx], fwd_sm[2][midx],
+                color=marker['color'], name=marker['label'],
+                symbol=marker.get('symbol', 'diamond'),
+                size=marker.get('size', 10),
+            ))
+            fig.add_trace(endpoint_trace(
+                bwd_sm[0][midx], bwd_sm[1][midx], bwd_sm[2][midx],
+                color=marker['color'], name=marker['label'],
+                symbol=marker.get('symbol', 'diamond'),
+                size=marker.get('size', 10),
+                showlegend=False,
+            ))
 
     fig.update_layout(
         title=dict(text=title, y=0.95, x=0.5, xanchor='center'),
@@ -2065,6 +2640,12 @@ def cross_project(result_fit, result_project, use_group_avg=False,
 
     r2 = compute_reconstruction_r2(pca_fit, X_for_r2)
 
+    # Cross-validated R² (only meaningful when n_features >> n_components)
+    if use_group_avg:
+        r2_cv = None  # ~4 features vs 3 PCs — CV not meaningful; use null model
+    else:
+        r2_cv, _ = _cv_r2_pca(X_for_r2, pca_fit.n_components)
+
     return {
         'projections': projections,
         'window_data': win_data,
@@ -2072,6 +2653,7 @@ def cross_project(result_fit, result_project, use_group_avg=False,
         'event_markers': markers,
         'metrics': metrics,
         'r2': r2,
+        'r2_cv': r2_cv,
         'pca_fit': pca_fit,
         'use_group_avg': use_group_avg,
         'fit_dataset': result_fit['config']['dataset_name'],
@@ -2148,40 +2730,52 @@ def cross_class_project(result_a, result_b, window=150, event_idx=600, dt=0.01,
         r2_per_pc.append(1.0 - ss_res / (ss_tot + 1e-12))
     r2_train = float(np.mean(r2_per_pc))
 
-    # ---- Cross-validated R² (k-fold, contiguous time blocks) ----
-    # Splits are on the time axis so autocorrelation within a block is
-    # preserved.  Each fold trains on the rest and evaluates on the held-out
-    # block.
+    # ---- Cross-validated R² (interleaved k-fold) ----
+    # Interleaved (strided) folds: fold k gets every n_folds-th timepoint
+    # starting at offset k.  This decorrelates train/test baselines, avoiding
+    # the failure mode where contiguous blocks expose different drift regimes.
+    # Each fold also refits PCA on training data only (no info leak from
+    # full-data PCA) and selects Ridge alpha independently via RidgeCV.
     n_time = X_b_arr.shape[1]   # 2T
-    fold_size = n_time // n_folds
-    cv_r2_folds = []  # shape: (n_folds, n_comp)
+    n_comp = pca_a.n_components
+    cv_r2_folds = []       # shape: (n_folds, n_comp)
+    cv_debug_folds = []    # per-fold diagnostics
 
     for fold in range(n_folds):
-        test_start = fold * fold_size
-        test_end   = test_start + fold_size if fold < n_folds - 1 else n_time
-
-        # Boolean masks
-        test_mask  = np.zeros(n_time, dtype=bool)
-        test_mask[test_start:test_end] = True
+        # Interleaved splits
+        test_mask = np.zeros(n_time, dtype=bool)
+        test_mask[fold::n_folds] = True
         train_mask = ~test_mask
 
-        X_b_train = X_b_arr[:, train_mask]   # (n_b, n_train)
-        Z_a_train  = Z_a[:, train_mask]       # (n_comp, n_train)
-        X_b_test   = X_b_arr[:, test_mask]
-        Z_a_test   = Z_a[:, test_mask]
+        # Refit PCA on class A training data only (prevents info leak)
+        pca_fold = PCA(n_components=n_comp)
+        pca_fold.fit(X_a_arr[:, train_mask].T)
 
-        _ridge_fold = Ridge(alpha=best_alpha, fit_intercept=True)
-        _ridge_fold.fit(X_b_train.T, Z_a_train.T)
-        W_fold = _ridge_fold.coef_.T
-        b_fold = _ridge_fold.intercept_
-        Z_pred_test = (X_b_test.T @ W_fold + b_fold).T  # (n_comp, n_test)
+        # Align PCA signs with full-data PCA to prevent arbitrary flips
+        for k in range(n_comp):
+            if np.dot(pca_fold.components_[k], pca_a.components_[k]) < 0:
+                pca_fold.components_[k] *= -1
+
+        Z_a_train = pca_fold.transform(X_a_arr[:, train_mask].T).T
+        Z_a_test = pca_fold.transform(X_a_arr[:, test_mask].T).T
+
+        # RidgeCV per fold (independent alpha selection)
+        ridge_fold = RidgeCV(alphas=_alphas, fit_intercept=True)
+        ridge_fold.fit(X_b_arr[:, train_mask].T, Z_a_train.T)
+        Z_pred_test = ridge_fold.predict(X_b_arr[:, test_mask].T).T
 
         fold_r2 = []
-        for k in range(Z_a.shape[0]):
+        for k in range(n_comp):
             ss_tot = float(np.sum((Z_a_test[k] - Z_a_test[k].mean()) ** 2))
             ss_res = float(np.sum((Z_a_test[k] - Z_pred_test[k]) ** 2))
             fold_r2.append(1.0 - ss_res / (ss_tot + 1e-12))
         cv_r2_folds.append(fold_r2)
+        cv_debug_folds.append({
+            'fold': fold,
+            'alpha': float(ridge_fold.alpha_),
+            'r2_per_pc': fold_r2,
+            'evr': pca_fold.explained_variance_ratio_.tolist(),
+        })
 
     cv_r2_arr = np.array(cv_r2_folds)          # (n_folds, n_comp)
     r2_cv_per_pc = cv_r2_arr.mean(axis=0).tolist()
@@ -2218,6 +2812,7 @@ def cross_class_project(result_a, result_b, window=150, event_idx=600, dt=0.01,
         'fit_class': result_a['config']['combo_label'],
         'project_class': result_b['config']['combo_label'],
         'dataset': ds_name,
+        'cv_debug': cv_debug_folds,
     }
 
 
@@ -2229,17 +2824,17 @@ def cross_class_project(result_a, result_b, window=150, event_idx=600, dt=0.01,
 _ABSOLUTE_EVENTS = {
     'SpontFB': [
         {'label': 'Spont', 'abs_idx': 600, 'color': 'purple',
-         'symbol': 'diamond', 'size': 14},
+         'symbol': 'diamond-open', 'size': 18},
     ],
     'CRFB': [
         {'label': 'CR', 'abs_idx': 600, 'color': 'red',
-         'symbol': 'diamond', 'size': 14},
+         'symbol': 'diamond-open', 'size': 18},
     ],
     'ToneFB': [
         {'label': 'Tone', 'abs_idx': 600, 'color': 'gold',
-         'symbol': 'diamond', 'size': 14},
+         'symbol': 'diamond-open', 'size': 18},
         {'label': 'Reward', 'abs_idx': 700, 'color': 'dodgerblue',
-         'symbol': 'square', 'size': 14},
+         'symbol': 'square-open', 'size': 18},
     ],
 }
 

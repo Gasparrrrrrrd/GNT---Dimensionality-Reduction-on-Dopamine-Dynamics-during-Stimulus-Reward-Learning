@@ -167,14 +167,14 @@ def smooth_trajectories(window_data, sg_window=11, sg_order=3):
 
 EVENT_RULES = {
     'SpontFB': [
-        {'label': 'Spont', 'offset': 0, 'color': 'purple', 'symbol': 'diamond', 'size': 14},
+        {'label': 'Spont', 'offset': 0, 'color': 'purple', 'symbol': 'diamond-open', 'size': 18},
     ],
     'CRFB': [
-        {'label': 'CR', 'offset': 0, 'color': 'red', 'symbol': 'diamond', 'size': 14},
+        {'label': 'CR', 'offset': 0, 'color': 'red', 'symbol': 'diamond-open', 'size': 18},
     ],
     'ToneFB': [
-        {'label': 'Tone', 'offset': 0, 'color': 'gold', 'symbol': 'diamond', 'size': 14},
-        {'label': 'Reward', 'offset': 100, 'color': 'dodgerblue', 'symbol': 'square', 'size': 14},
+        {'label': 'Tone', 'offset': 0, 'color': 'gold', 'symbol': 'diamond-open', 'size': 18},
+        {'label': 'Reward', 'offset': 100, 'color': 'dodgerblue', 'symbol': 'square-open', 'size': 18},
     ],
 }
 
