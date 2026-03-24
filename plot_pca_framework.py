@@ -96,7 +96,7 @@ def extract_neuron_data(data, neuron_groups):
     if not parts:
         raise ValueError("No neurons remaining after NaN removal.")
 
-    X = pd.concat(parts, axis=0)
+    X = pd.concat(parts, axis=0).astype(np.float32)
     return X, timesteps, stats
 
 
@@ -138,7 +138,7 @@ def extract_group_averaged_data(data, neuron_groups):
     if not rows:
         raise ValueError("No groups with valid data for averaging.")
 
-    X = pd.DataFrame(np.array(rows))
+    X = pd.DataFrame(np.array(rows, dtype=np.float32))
     return X, timesteps, group_labels
 
 
@@ -2867,16 +2867,40 @@ def get_epoch_event_markers(dataset_name, epoch_start, epoch_end):
     return markers, []
 
 
-def analyze_epoch(data, neuron_groups, dataset_name, combo_label,
-                  epoch_name, epoch_start, epoch_end,
+def analyze_epoch(result=None, data=None, neuron_groups=None, dataset_name=None, combo_label=None,
+                  epoch_name=None, epoch_start=None, epoch_end=None,
                   n_components=3, dt=0.01, sg_window=11, sg_order=3):
     """Run PCA on a specific time epoch within a dataset.
 
-    Slices the neuron data to [epoch_start, epoch_end) for both fwd and
-    bwd halves, fits PCA on that slice, and produces trajectory data.
+    Accepts either:
+      - result: full result dict from analyze_dataset (extracts data, groups, etc.)
+      - individual parameters: data, neuron_groups, dataset_name, combo_label
+
+    Also looks up epoch_start/epoch_end from global EPOCHS dict if epoch_name given.
 
     Returns dict with epoch-specific results.
     """
+    # If result dict provided, extract components from it
+    if result is not None:
+        data = result.get('data')
+        neuron_groups = result['config']['neuron_groups']
+        dataset_name = result['config']['dataset_name']
+        combo_label = result['config']['combo_label']
+        
+    # If epoch_name is given, look up start/end from EPOCHS
+    if epoch_name is not None and (epoch_start is None or epoch_end is None):
+        if epoch_name in EPOCHS:
+            epoch_start = EPOCHS[epoch_name]['start']
+            epoch_end = EPOCHS[epoch_name]['end']
+        else:
+            raise ValueError(f"Unknown epoch_name: {epoch_name}")
+    
+    # Validate we have all required parameters
+    if data is None or neuron_groups is None:
+        raise ValueError("Must provide either 'result' dict or 'data' + 'neuron_groups'")
+    if epoch_start is None or epoch_end is None:
+        raise ValueError("Must provide 'epoch_start' and 'epoch_end' or valid 'epoch_name'")
+    
     X, ts, stats = extract_neuron_data(data, neuron_groups)
     X_epoch, epoch_ts = slice_epoch(X, ts, epoch_start, epoch_end)
     epoch_len = epoch_end - epoch_start
@@ -3278,3 +3302,689 @@ def plot_divergence_comparison(div_dict, title="Fwd-Bwd Trajectory Divergence"):
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
     return fig
+
+
+# ===========================================================================
+# Advanced Analysis A: Smoothing Sensitivity
+# ===========================================================================
+
+def run_smoothing_sensitivity(result, sg_windows=None, sg_order=3):
+    """Test how fwd-bwd separation metrics depend on SG smoothing window size.
+
+    For each window size, re-smooths the raw (unsmoothed) PC projections stored
+    in result['window_data'] and recomputes trajectory / separation metrics.
+
+    Args:
+        result: dict returned by run_pca() / analyze_dataset(), must contain
+                'window_data' with keys 'fwd' and 'bwd' (n_comp × n_time).
+        sg_windows: list of int window sizes to test. 0 = no smoothing.
+                    Defaults to [0, 5, 11, 25, 51].
+        sg_order:   SG polynomial order (applied when window > 0).
+
+    Returns:
+        summary_df: pd.DataFrame with columns
+            [sg_window, mean_sep, peak_sep, post_event_mean, cohens_d,
+             divergence_onset_idx, auc_above_baseline]
+        trajectories: dict {sg_window: {'fwd': array, 'bwd': array}}
+    """
+    if sg_windows is None:
+        sg_windows = [0, 5, 11, 25, 51]
+
+    window_data = result['window_data']
+    fwd_raw = np.array(window_data['fwd'])   # (n_comp, T)
+    bwd_raw = np.array(window_data['bwd'])
+    n_comp, T = fwd_raw.shape
+    # Event is always centered in window by construction in slice_window()
+    cfg = result.get('config', {})
+    event_idx = cfg.get('window', T // 2)  # = WINDOW parameter, event at center
+
+    records = []
+    trajectories = {}
+    for w in sg_windows:
+        if w == 0:
+            fwd_s = fwd_raw.copy()
+            bwd_s = bwd_raw.copy()
+        else:
+            # window must be odd and > sg_order
+            win = w if w % 2 == 1 else w + 1
+            win = max(win, sg_order + 2 if (sg_order + 2) % 2 == 1 else sg_order + 3)
+            fwd_s = np.array([savgol_filter(fwd_raw[i], win, sg_order)
+                               for i in range(n_comp)])
+            bwd_s = np.array([savgol_filter(bwd_raw[i], win, sg_order)
+                               for i in range(n_comp)])
+
+        trajectories[w] = {'fwd': fwd_s, 'bwd': bwd_s}
+
+        # Euclidean separation at each timestep
+        sep = np.sqrt(np.sum((fwd_s - bwd_s) ** 2, axis=0))
+
+        pre = sep[:event_idx]
+        post = sep[event_idx:]
+        baseline_mean = pre.mean()
+        baseline_std = pre.std() + 1e-10
+
+        mean_sep = sep.mean()
+        peak_sep = sep.max()
+        post_event_mean = post.mean()
+        cohens_d = (post.mean() - pre.mean()) / baseline_std
+        auc = np.sum(np.maximum(sep - baseline_mean, 0))
+
+        # divergence onset: first post-event idx exceeding baseline + 2*std
+        thresh = baseline_mean + 2 * baseline_std
+        onset_idx = None
+        for ti in range(event_idx, T):
+            if sep[ti] > thresh:
+                onset_idx = ti - event_idx   # relative to event
+                break
+
+        records.append({
+            'sg_window': w,
+            'mean_sep': mean_sep,
+            'peak_sep': peak_sep,
+            'post_event_mean': post_event_mean,
+            'cohens_d': cohens_d,
+            'divergence_onset_idx': onset_idx,
+            'auc_above_baseline': auc,
+        })
+
+    summary_df = pd.DataFrame(records)
+    return summary_df, trajectories
+
+
+def plot_smoothing_sensitivity(summary_df, trajectories, event_idx=None,
+                                title="Smoothing Sensitivity"):
+    """Two-panel figure for smoothing sensitivity results.
+
+    Left: fwd-bwd separation timecourses, one curve per SG window.
+    Right: bar chart of peak separation by window size.
+    """
+    windows = sorted(trajectories.keys())
+    colors = plt.cm.viridis(np.linspace(0, 1, len(windows)))
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    ax = axes[0]
+    for w, col in zip(windows, colors):
+        fwd = trajectories[w]['fwd']
+        bwd = trajectories[w]['bwd']
+        sep = np.sqrt(np.sum((fwd - bwd) ** 2, axis=0))
+        T = len(sep)
+        t = np.arange(T)
+        label = f'SG={w}' if w > 0 else 'raw (w=0)'
+        ax.plot(t, sep, color=col, label=label, linewidth=1.5)
+    if event_idx is not None:
+        ax.axvline(event_idx, color='k', linestyle='--', alpha=0.6,
+                   label='Event')
+    ax.set_xlabel('Time (samples)', fontsize=11)
+    ax.set_ylabel('Fwd-Bwd Separation', fontsize=11)
+    ax.set_title('Separation Timecourses', fontsize=12)
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3)
+
+    ax2 = axes[1]
+    peak_seps = summary_df.set_index('sg_window')['peak_sep']
+    ax2.bar([str(w) for w in windows], [peak_seps[w] for w in windows],
+            color=colors, alpha=0.85)
+    ax2.set_xlabel('SG Window Size (samples)', fontsize=11)
+    ax2.set_ylabel('Peak Separation', fontsize=11)
+    ax2.set_title('Peak Separation vs Smoothing', fontsize=12)
+    ax2.grid(True, alpha=0.3, axis='y')
+
+    fig.suptitle(title, fontsize=13)
+    fig.tight_layout()
+    return fig
+
+
+# ===========================================================================
+# Advanced Analysis C: Reward Timing Jitter
+# ===========================================================================
+
+def compute_burst_sharpness(speed_profile, search_window=(660, 760),
+                             event_offset=600):
+    """Fit a Gaussian to the speed peak in search_window and return sharpness metrics.
+
+    Args:
+        speed_profile: 1-D array of trajectory speed (Euclidean distance per
+                       timestep in PC space), indexed by absolute timestep.
+        search_window: (start, end) absolute timestep range to search for peak.
+        event_offset:  offset between array index 0 and the absolute timestep 0
+                       (default 600: array[0] corresponds to t=600 if the window
+                       starts at t=600). Set to 0 if speed_profile is already
+                       indexed from 0.
+
+    Returns:
+        dict with keys: peak_t (abs timestep), peak_height, sigma_samples,
+                        fwhm_samples, fit_r2, gaussian_fitted (bool)
+    """
+    from scipy.optimize import curve_fit
+    from scipy.stats import pearsonr
+
+    def gaussian(x, amp, mu, sigma, offset):
+        return amp * np.exp(-0.5 * ((x - mu) / sigma) ** 2) + offset
+
+    s0, s1 = search_window
+    idx0 = max(s0 - event_offset, 0)
+    idx1 = min(s1 - event_offset, len(speed_profile))
+    seg = speed_profile[idx0:idx1]
+    t_abs = np.arange(s0, s0 + len(seg))
+
+    peak_local_idx = np.argmax(seg)
+    peak_t = t_abs[peak_local_idx]
+    peak_height = seg[peak_local_idx]
+
+    result = {
+        'peak_t': peak_t,
+        'peak_height': peak_height,
+        'sigma_samples': np.nan,
+        'fwhm_samples': np.nan,
+        'fit_r2': np.nan,
+        'gaussian_fitted': False,
+    }
+
+    if len(seg) < 5:
+        return result
+
+    try:
+        p0 = [peak_height - seg.min(), peak_t, 10.0, seg.min()]
+        bounds = ([0, s0, 1, -np.inf], [np.inf, s1, (s1 - s0), np.inf])
+        popt, _ = curve_fit(gaussian, t_abs, seg, p0=p0, bounds=bounds,
+                            maxfev=5000)
+        amp, mu, sigma, offset = popt
+        fitted = gaussian(t_abs, *popt)
+        ss_res = np.sum((seg - fitted) ** 2)
+        ss_tot = np.sum((seg - seg.mean()) ** 2)
+        r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
+        result.update({
+            'sigma_samples': abs(sigma),
+            'fwhm_samples': 2.355 * abs(sigma),
+            'fit_r2': r2,
+            'gaussian_fitted': True,
+        })
+    except Exception:
+        pass  # keep NaNs if fit fails
+
+    return result
+
+
+def simulate_jitter_smearing(clean_burst, jitter_sigmas, observed_burst=None):
+    """Simulate what a movement-locked burst looks like after CR-onset jitter smearing.
+
+    CS-aligned trial averages of movement-locked signals are blurred by the
+    distribution of CR onset times. A Gaussian with σ = jitter models this.
+
+    Args:
+        clean_burst:    1-D array — the reference (unsmeared) burst profile.
+                        Typically from CRFB where reward is shuffled.
+        jitter_sigmas:  list of float — σ values (in samples) to test.
+        observed_burst: 1-D array — the ToneFB burst to compare against.
+                        If None, only smeared hypotheses are returned.
+
+    Returns:
+        pd.DataFrame with columns: sigma, hypothesis, r2_vs_observed, mse_vs_observed
+        plus a dict {sigma: smeared_burst} for plotting.
+    """
+    from scipy.ndimage import gaussian_filter1d
+
+    records = []
+    smeared = {}
+
+    for sigma in jitter_sigmas:
+        if sigma == 0:
+            s = clean_burst.copy()
+        else:
+            s = gaussian_filter1d(clean_burst.astype(float), sigma=sigma)
+        smeared[sigma] = s
+
+        if observed_burst is not None:
+            n = min(len(s), len(observed_burst))
+            obs = observed_burst[:n]
+            pred = s[:n]
+            ss_res = np.sum((obs - pred) ** 2)
+            ss_tot = np.sum((obs - obs.mean()) ** 2)
+            r2 = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
+            mse = ss_res / n
+        else:
+            r2 = np.nan
+            mse = np.nan
+
+        records.append({
+            'sigma': sigma,
+            'hypothesis': f'movement-locked (jitter σ={sigma})',
+            'r2_vs_observed': r2,
+            'mse_vs_observed': mse,
+        })
+
+    # Also add the reward-locked hypothesis: unsmeared clean_burst at fixed t
+    if observed_burst is not None:
+        n = min(len(clean_burst), len(observed_burst))
+        obs = observed_burst[:n]
+        pred = clean_burst[:n]
+        ss_res = np.sum((obs - pred) ** 2)
+        ss_tot = np.sum((obs - obs.mean()) ** 2)
+        r2_rew = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
+        mse_rew = ss_res / n
+        records.append({
+            'sigma': 0,
+            'hypothesis': 'reward-locked (sharp, no jitter)',
+            'r2_vs_observed': r2_rew,
+            'mse_vs_observed': mse_rew,
+        })
+
+    return pd.DataFrame(records), smeared
+
+
+def compute_pre_post_reward_separation(fwd_proj, bwd_proj,
+                                        reward_idx=700, window=50,
+                                        event_offset=600):
+    """Compare mean fwd-bwd separation in pre- vs post-reward windows.
+
+    Args:
+        fwd_proj, bwd_proj: (n_comp, T) arrays indexed from event_offset.
+        reward_idx:  absolute timestep of reward delivery (default 700).
+        window:      half-width of each comparison window in samples.
+                     Default 50 (not 60) to stay within typical 301-sample
+                     analysis windows (reward at index 250, 250+50=300 ≤ 301).
+        event_offset: what absolute timestep corresponds to array index 0.
+
+    Returns:
+        dict: pre_mean, post_mean, ratio, pre_window, post_window (abs timesteps)
+    """
+    ri = reward_idx - event_offset
+    ri = max(ri, window)
+    ri = min(ri, fwd_proj.shape[1] - window)
+
+    sep = np.sqrt(np.sum((fwd_proj - bwd_proj) ** 2, axis=0))
+    pre_mean = sep[ri - window: ri].mean()
+    post_mean = sep[ri: ri + window].mean()
+    ratio = post_mean / (pre_mean + 1e-10)
+
+    return {
+        'pre_mean': pre_mean,
+        'post_mean': post_mean,
+        'ratio': ratio,
+        'pre_window': (reward_idx - window, reward_idx),
+        'post_window': (reward_idx, reward_idx + window),
+    }
+
+
+# ===========================================================================
+# Advanced Analysis D: Demixed PCA (dPCA)
+# ===========================================================================
+
+def run_dpca(X_fwd, X_bwd, n_components=3, labels='st', regularizer='auto'):
+    """Run demixed PCA to decompose neural variance into task-variable components.
+
+    Requires the `dpca` package: pip install dpca  (Kobak et al. 2016,
+    https://github.com/machenslab/dPCA).
+
+    Args:
+        X_fwd, X_bwd: (n_neurons, T) arrays — condition-averaged firing rates
+                      for forward and backward conditions respectively.
+        n_components: int — number of dPCA components per marginalization.
+        labels:       str — marginalization labels matching data tensor axes
+                      after the neuron axis.  For tensor shape (N, S, T),
+                      use 'st' where 's' = stimulus/direction (axis 1) and
+                      't' = time (axis 2).  Interaction = 'st'.
+        regularizer:  passed to dPCA constructor ('auto' recommended without
+                      per-trial noise covariance).
+
+    Returns:
+        dpca_obj:     fitted dPCA object (has .P, .D attributes per label)
+        var_fracs:    dict {marginalization_label: explained_variance_fraction}
+        Z:            dict {label: array of shape (n_comp, n_stim, T)} —
+                      decoded timecourses per marginalization and condition.
+
+    Notes:
+        Without per-trial data, noise covariance is not estimated; the
+        regularizer is approximate. Results will be upgraded once single-trial
+        data is available.
+    """
+    try:
+        from dPCA.dPCA import dPCA as dPCAclass
+    except ImportError:
+        raise ImportError(
+            "dPCA package not found. Install with: pip install dpca\n"
+            "GitHub: https://github.com/machenslab/dPCA"
+        )
+
+    X_fwd_arr = np.array(X_fwd, dtype=np.float64)
+    X_bwd_arr = np.array(X_bwd, dtype=np.float64)
+
+    # Build condition-averaged tensor: (n_neurons, n_stimuli=2, T)
+    trialR = np.stack([X_fwd_arr, X_bwd_arr], axis=1)  # (N, 2, T)
+
+    # Population mean (time-only component baseline)
+    R = trialR.mean(axis=1, keepdims=True)  # grand mean (N, 1, T) — not used directly
+
+    dpca_obj = dPCAclass(labels=labels, n_components=n_components,
+                          regularizer=regularizer)
+    dpca_obj.fit(trialR)
+
+    # Extract decoded timecourses Z[label] shape (n_comp, n_stim, T)
+    Z = dpca_obj.transform(trialR)
+
+    # Variance explained per marginalization
+    total_var = np.sum(trialR ** 2)
+    var_fracs = {}
+    for label in dpca_obj.explained_variance_ratio_:
+        var_fracs[label] = float(np.sum(dpca_obj.explained_variance_ratio_[label]))
+
+    return dpca_obj, var_fracs, Z
+
+
+def plot_dpca_variance_fractions(var_fracs_dict, title="dPCA Variance Fractions"):
+    """Stacked bar chart comparing dPCA variance fractions across analyses.
+
+    Args:
+        var_fracs_dict: dict of {analysis_label: {marginalization: fraction}}
+                        e.g. {'SpontFB DA': {'t': 0.6, 's': 0.3, 'st': 0.1}}
+    """
+    marginalizations = sorted({m for vf in var_fracs_dict.values() for m in vf})
+    color_map = {
+        't':  '#3498db',   # time — blue
+        's':  '#e74c3c',   # direction — red
+        'st': '#f39c12',   # interaction — orange
+        'n':  '#95a5a6',   # noise — grey
+    }
+    analyses = list(var_fracs_dict.keys())
+    x = np.arange(len(analyses))
+
+    fig, ax = plt.subplots(figsize=(max(8, len(analyses) * 1.5), 5))
+    bottoms = np.zeros(len(analyses))
+    for m in marginalizations:
+        vals = np.array([var_fracs_dict[a].get(m, 0.0) for a in analyses])
+        label_map = {'t': 'Time', 's': 'Direction', 'st': 'Dir×Time', 'n': 'Noise'}
+        ax.bar(x, vals, bottom=bottoms,
+               color=color_map.get(m, '#7f8c8d'),
+               label=label_map.get(m, m), alpha=0.85)
+        bottoms += vals
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(analyses, rotation=35, ha='right', fontsize=9)
+    ax.set_ylabel('Fraction of Variance Explained', fontsize=11)
+    ax.set_title(title, fontsize=13)
+    ax.legend(fontsize=9, loc='upper right')
+    ax.set_ylim(0, 1)
+    ax.grid(True, alpha=0.3, axis='y')
+    fig.tight_layout()
+    return fig
+
+
+def plot_dpca_timecourses(Z, labels_order=None, title="dPCA Timecourses"):
+    """Plot decoded timecourses for each marginalization component.
+
+    Args:
+        Z:             dict {label: array (n_comp, n_stim, T)}
+        labels_order:  list of labels to plot (default: all keys in Z)
+    """
+    if labels_order is None:
+        labels_order = list(Z.keys())
+
+    cond_colors = ['#e74c3c', '#3498db']   # fwd=red, bwd=blue
+    cond_labels = ['Forward', 'Backward']
+
+    n_marg = len(labels_order)
+    n_comp = max(Z[l].shape[0] for l in labels_order)
+
+    fig, axes = plt.subplots(n_comp, n_marg,
+                              figsize=(4 * n_marg, 2.5 * n_comp),
+                              sharex=True)
+    if n_comp == 1:
+        axes = axes[np.newaxis, :]
+    if n_marg == 1:
+        axes = axes[:, np.newaxis]
+
+    label_names = {'t': 'Time', 's': 'Direction', 'st': 'Dir×Time'}
+
+    for col, label in enumerate(labels_order):
+        Zl = Z[label]   # (n_comp_l, n_stim, T)
+        n_comp_l = Zl.shape[0]
+        n_stim = Zl.shape[1]
+        for row in range(n_comp):
+            ax = axes[row, col]
+            if row < n_comp_l:
+                for s in range(n_stim):
+                    clr = cond_colors[s] if s < len(cond_colors) else f'C{s}'
+                    lbl = cond_labels[s] if s < len(cond_labels) else f'cond{s}'
+                    ax.plot(Zl[row, s], color=clr, linewidth=1.5,
+                            label=lbl if row == 0 else '_')
+            else:
+                ax.set_visible(False)
+                continue
+            if row == 0:
+                ax.set_title(label_names.get(label, label), fontsize=11)
+            if col == 0:
+                ax.set_ylabel(f'Component {row+1}', fontsize=9)
+            ax.axhline(0, color='k', linewidth=0.5, alpha=0.4)
+            ax.grid(True, alpha=0.2)
+
+    handles = [plt.Line2D([0], [0], color=cond_colors[i], lw=2,
+                           label=cond_labels[i]) for i in range(2)]
+    fig.legend(handles=handles, loc='upper right', fontsize=9)
+    fig.suptitle(title, fontsize=13)
+    fig.tight_layout()
+    return fig
+
+
+# ===========================================================================
+# Advanced Analysis E: Regression-Based Confound Removal
+# ===========================================================================
+
+def partial_out_reward_regressor(X_fwd, X_bwd, reward_onset_idx=700,
+                                  method='boxcar', reference_X_fwd=None,
+                                  event_offset=600, baseline_window=(450, 600)):
+    """Partial out reward-value signal from ToneFB firing rates before PCA.
+
+    In ToneFB, forward = rewarded, backward = unrewarded. This confound means
+    PCA separation might reflect reward expectation rather than movement direction.
+    This function regresses out reward-correlated variance from each neuron's FR
+    before PCA, allowing us to test whether direction separation persists.
+
+    Args:
+        X_fwd, X_bwd: (n_neurons, T) arrays of firing rates.
+        reward_onset_idx: absolute timestep of reward delivery (default 700).
+        method: 'boxcar' — use a step function regressor (1 from reward to end,
+                            0 before, applied to forward only).
+                'data_driven' — use the post-reward mean change (population
+                                response to reward) as the regressor.
+                'both' — run both and return results for each.
+        reference_X_fwd: (n_neurons, T) optional — forward FR from SpontFB used
+                         to orthogonalize the data-driven regressor so that the
+                         movement signal itself is not over-removed.
+        event_offset: what absolute timestep corresponds to array index 0.
+        baseline_window: (start, end) absolute timesteps for baseline epoch.
+
+    Returns:
+        results: dict with keys depending on method:
+            'boxcar' or 'data_driven': {'X_fwd_resid', 'X_bwd_resid',
+                                        'regressor', 'beta' (per neuron),
+                                        'variance_removed_frac'}
+            'both': nested dict with 'boxcar' and 'data_driven' entries.
+    """
+    X_fwd_arr = np.array(X_fwd, dtype=np.float64)
+    X_bwd_arr = np.array(X_bwd, dtype=np.float64)
+    n_neurons, T = X_fwd_arr.shape
+
+    ri = reward_onset_idx - event_offset
+    ri = max(0, min(ri, T))
+
+    b0 = baseline_window[0] - event_offset
+    b1 = baseline_window[1] - event_offset
+    b0 = max(0, b0)
+    b1 = min(T, b1)
+
+    def _regress_out(X_fwd_in, X_bwd_in, regressor):
+        """Regress `regressor` (length T) out of each neuron's fwd FR.
+        Backward FR is unchanged (no reward delivered for unrewarded trials)."""
+        reg = regressor.astype(np.float64)
+        reg_norm = reg - reg.mean()
+        reg_var = np.dot(reg_norm, reg_norm)
+
+        X_fwd_resid = X_fwd_in.copy()
+        betas = np.zeros(n_neurons)
+        for i in range(n_neurons):
+            signal = X_fwd_in[i] - X_fwd_in[i].mean()
+            beta = np.dot(signal, reg_norm) / (reg_var + 1e-12)
+            X_fwd_resid[i] = X_fwd_in[i] - beta * reg_norm
+            betas[i] = beta
+
+        var_orig = np.var(X_fwd_in)
+        var_resid = np.var(X_fwd_resid)
+        var_removed = 1.0 - var_resid / (var_orig + 1e-12)
+
+        return X_fwd_resid, X_bwd_in.copy(), regressor, betas, var_removed
+
+    def _boxcar():
+        reg = np.zeros(T)
+        reg[ri:] = 1.0
+        return _regress_out(X_fwd_arr, X_bwd_arr, reg)
+
+    def _data_driven():
+        # Post-reward mean minus pre-tone baseline, for fwd trials
+        post = X_fwd_arr[:, ri:min(ri + 150, T)].mean(axis=1)
+        base = X_fwd_arr[:, b0:b1].mean(axis=1)
+        reward_response = post - base  # (n_neurons,) — each neuron's reward response
+
+        # Build temporal regressor: time course that correlates with reward_response
+        # Use a boxcar shape but scaled by per-neuron reward_response magnitude
+        reg_temporal = np.zeros(T)
+        reg_temporal[ri:min(ri + 150, T)] = 1.0
+
+        # Orthogonalize w.r.t. movement component if reference provided
+        if reference_X_fwd is not None:
+            ref_arr = np.array(reference_X_fwd, dtype=np.float64)
+            if ref_arr.shape == X_fwd_arr.shape:
+                # Movement template: mean over reference neurons
+                mov_template = ref_arr.mean(axis=0)
+                mov_norm = mov_template - mov_template.mean()
+                mov_var = np.dot(mov_norm, mov_norm)
+                if mov_var > 1e-12:
+                    proj = np.dot(reg_temporal - reg_temporal.mean(), mov_norm) / mov_var
+                    reg_temporal = reg_temporal - proj * mov_norm
+                    reg_temporal -= reg_temporal.mean()
+
+        # Scale regressor by each neuron's reward response (data-driven weighting)
+        # Use the temporal shape as regressor, neuron-specific scaling captured by beta
+        return _regress_out(X_fwd_arr, X_bwd_arr, reg_temporal)
+
+    methods_to_run = ['boxcar', 'data_driven'] if method == 'both' else [method]
+    fn_map = {'boxcar': _boxcar, 'data_driven': _data_driven}
+
+    results = {}
+    for m in methods_to_run:
+        fwd_r, bwd_r, reg, betas, var_rm = fn_map[m]()
+        results[m] = {
+            'X_fwd_resid': fwd_r,
+            'X_bwd_resid': bwd_r,
+            'regressor': reg,
+            'beta': betas,
+            'variance_removed_frac': var_rm,
+        }
+
+    return results if method == 'both' else results[method]
+
+
+def compare_pca_before_after_confound_removal(X_fwd_orig, X_bwd_orig,
+                                               X_fwd_resid, X_bwd_resid,
+                                               n_components=3):
+    """Run PCA on original and residual data; compare separation and EVR.
+
+    Returns a summary dict with EVR, peak_separation, post_event_mean for
+    both the original and residual analyses, plus relative reduction metrics.
+    """
+    def _run(Xf, Xb):
+        X_all = np.concatenate([Xf, Xb], axis=1)  # fit on both conditions
+        pca = PCA(n_components=n_components)
+        pca.fit(X_all.T)
+        Zf = pca.components_ @ (Xf - pca.mean_[:, np.newaxis])
+        Zb = pca.components_ @ (Xb - pca.mean_[:, np.newaxis])
+        sep = np.sqrt(np.sum((Zf - Zb) ** 2, axis=0))
+        T = sep.shape[0]
+        mid = T // 2
+        return {
+            'evr': pca.explained_variance_ratio_.tolist(),
+            'evr_total': float(pca.explained_variance_ratio_.sum()),
+            'peak_sep': float(sep.max()),
+            'post_event_mean': float(sep[mid:].mean()),
+            'sep_curve': sep,
+        }
+
+    orig = _run(np.array(X_fwd_orig, dtype=np.float64),
+                np.array(X_bwd_orig, dtype=np.float64))
+    resid = _run(np.array(X_fwd_resid, dtype=np.float64),
+                 np.array(X_bwd_resid, dtype=np.float64))
+
+    return {
+        'original': orig,
+        'residual': resid,
+        'peak_sep_reduction_pct': 100 * (1 - resid['peak_sep'] / (orig['peak_sep'] + 1e-12)),
+        'post_event_reduction_pct': 100 * (1 - resid['post_event_mean'] / (orig['post_event_mean'] + 1e-12)),
+        'evr_total_reduction_pct': 100 * (1 - resid['evr_total'] / (orig['evr_total'] + 1e-12)),
+    }
+
+
+# ===========================================================================
+# Advanced Analysis P1: Population Vector Correlation
+# ===========================================================================
+
+def compute_population_vector_correlation(X_fwd, X_bwd):
+    """Compute Pearson correlation between forward and backward population vectors
+    at each timepoint. Model-free measure of representational similarity.
+
+    Args:
+        X_fwd, X_bwd: (n_neurons, T) arrays.
+
+    Returns:
+        r_timecourse:  (T,) array of Pearson r values.
+        p_timecourse:  (T,) array of p-values.
+    """
+    from scipy.stats import pearsonr
+    X_fwd_arr = np.array(X_fwd, dtype=np.float64)
+    X_bwd_arr = np.array(X_bwd, dtype=np.float64)
+    T = X_fwd_arr.shape[1]
+
+    r_vals = np.zeros(T)
+    p_vals = np.zeros(T)
+    for t in range(T):
+        r, p = pearsonr(X_fwd_arr[:, t], X_bwd_arr[:, t])
+        r_vals[t] = r
+        p_vals[t] = p
+
+    return r_vals, p_vals
+
+
+# ===========================================================================
+# Advanced Analysis P3: Grassmann Distance
+# ===========================================================================
+
+def compute_grassmann_distance(components_a, components_b):
+    """Compute the Grassmann distance between two subspaces.
+
+    The Grassmann distance is the Frobenius norm of the matrix of principal
+    angles between the two subspaces:  d = sqrt(sum(theta_i^2))
+    where theta_i = arccos(sigma_i) and sigma_i are singular values of
+    components_a @ components_b.T.
+
+    Args:
+        components_a, components_b: (n_comp, n_features) orthonormal basis matrices,
+                                    e.g. pca.components_ from sklearn.
+
+    Returns:
+        dict with keys: grassmann_distance, principal_angles_deg, subspace_overlap
+    """
+    A = np.array(components_a, dtype=np.float64)
+    B = np.array(components_b, dtype=np.float64)
+
+    # Gram matrix
+    M = A @ B.T
+    svd_vals = np.linalg.svd(M, compute_uv=False)
+    svd_vals = np.clip(svd_vals, -1.0, 1.0)
+
+    principal_angles = np.arccos(svd_vals)   # radians
+    grassmann_dist = float(np.sqrt(np.sum(principal_angles ** 2)))
+
+    return {
+        'grassmann_distance': grassmann_dist,
+        'principal_angles_deg': np.degrees(principal_angles).tolist(),
+        'subspace_overlap': float(np.mean(svd_vals)),   # same as before
+    }
